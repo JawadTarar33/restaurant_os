@@ -70,6 +70,7 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = 'restaurant.wsgi.application'
+AUTH_USER_MODEL = 'restaurant_os.User'
 
 
 # Database

@@ -1,92 +1,83 @@
 from rest_framework import serializers
+from .models import MenuItem, Sale, DailySale, Inventory, Supplier, InventoryOrder
 from django.utils import timezone
-from .models import Menu, Sales, SalesItem
 
 
-class MenuSerializer(serializers.ModelSerializer):
+class SupplierSerializer(serializers.ModelSerializer):
     class Meta:
-        model = Menu
+        model = Supplier
         fields = '__all__'
-        read_only_fields = ['id']
 
 
-class SalesItemSerializer(serializers.ModelSerializer):
-    item_name = serializers.CharField(source='item.item_name', read_only=True)
-    
+class InventorySerializer(serializers.ModelSerializer):
+    supplier = SupplierSerializer(read_only=True)
+    supplier_id = serializers.PrimaryKeyRelatedField(
+        queryset=Supplier.objects.all(), source='supplier', write_only=True
+    )
+
     class Meta:
-        model = SalesItem
-        fields = ['id', 'item', 'item_name', 'quantity', 'price_per_unit', 'discount', 'subtotal']
-        read_only_fields = ['id', 'price_per_unit', 'subtotal']
-    
-    def validate_quantity(self, value):
-        if value <= 0:
-            raise serializers.ValidationError("Quantity must be greater than 0")
-        return value
+        model = Inventory
+        fields = ['id', 'item_name', 'quantity', 'reorder_level', 'unit_price', 'supplier', 'supplier_id']
 
 
-class SalesSerializer(serializers.ModelSerializer):
-    sale_items = SalesItemSerializer(many=True)
-    
+class InventoryOrderSerializer(serializers.ModelSerializer):
+    supplier = SupplierSerializer(read_only=True)
+
     class Meta:
-        model = Sales
-        fields = ['id', 'sale_date', 'is_weekend', 'total_amount', 'discount', 'final_amount', 'sale_items']
-        read_only_fields = ['id', 'sale_date', 'is_weekend', 'total_amount', 'final_amount']
-    
+        model = InventoryOrder
+        fields = '__all__'
+
+
+class MenuItemSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = MenuItem
+        fields = '__all__'
+
+
+class SaleSerializer(serializers.ModelSerializer):
+    menu_item = MenuItemSerializer(read_only=True)
+    menu_item_id = serializers.PrimaryKeyRelatedField(
+        queryset=MenuItem.objects.all(), source='menu_item', write_only=True
+    )
+
+    class Meta:
+        model = Sale
+        fields = ['id', 'menu_item', 'menu_item_id', 'quantity', 'total_price', 'timestamp']
+
     def create(self, validated_data):
-        items_data = validated_data.pop('sale_items')
-        
-        # Create the sale
-        sale_date = timezone.now()
-        is_weekend = sale_date.weekday() >= 5
-        
-        sale = Sales.objects.create(
-            is_weekend=is_weekend,
-            discount=validated_data.get('discount', 0.0)
-        )
-        
-        # Create sale items
-        for item_data in items_data:
-            menu_item = item_data['item']
-            quantity = item_data['quantity']
-            item_discount = item_data.get('discount', 0.0)
-            
-            SalesItem.objects.create(
-                sale=sale,
-                item=menu_item,
-                quantity=quantity,
-                price_per_unit=menu_item.sales_price,
-                discount=item_discount
-            )
-        
-        # Calculate totals
-        sale.calculate_totals()
-        
-        return sale
-    
-    def update(self, instance, validated_data):
-        items_data = validated_data.pop('sale_items', None)
-        
-        # Update sale-level fields
-        instance.discount = validated_data.get('discount', instance.discount)
-        
-        if items_data is not None:
-            # Clear existing items and create new ones
-            instance.sale_items.all().delete()
-            
-            for item_data in items_data:
-                menu_item = item_data['item']
-                quantity = item_data['quantity']
-                item_discount = item_data.get('discount', 0.0)
-                
-                SalesItem.objects.create(
-                    sale=instance,
-                    item=menu_item,
-                    quantity=quantity,
-                    price_per_unit=menu_item.sales_price,
-                    discount=item_discount
+        sale = super().create(validated_data)
+        menu_item = sale.menu_item
+
+        # Reduce inventory (assuming item_name matches inventory)
+        try:
+            inventory_item = Inventory.objects.get(item_name=menu_item.name)
+            inventory_item.quantity -= sale.quantity
+            inventory_item.save()
+
+            # Trigger reorder if low
+            if inventory_item.quantity <= inventory_item.reorder_level:
+                InventoryOrder.objects.get_or_create(
+                    supplier=inventory_item.supplier,
+                    item_name=inventory_item.item_name,
+                    quantity=inventory_item.reorder_level * 2,  # reorder double the threshold
                 )
-        
-        # Recalculate totals
-        instance.calculate_totals()
-        
-        return instance
+        except Inventory.DoesNotExist:
+            pass
+
+        # Update daily sales
+        today = timezone.now().date()
+        daily_sale, created = DailySale.objects.get_or_create(date=today)
+        daily_sale.total_sales += sale.total_price
+        daily_sale.save()
+
+        # Update menu popularity
+        menu_item.popularity_score += sale.quantity
+        menu_item.save()
+
+        return sale
+
+
+class DailySaleSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DailySale
+        fields = '__all__'

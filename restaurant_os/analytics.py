@@ -42,4 +42,3 @@ def forecast_sales(item_id=None, periods=30):
 
     # 🔑 Return the DataFrame, not a list
     return forecast
-

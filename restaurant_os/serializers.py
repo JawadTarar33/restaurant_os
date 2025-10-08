@@ -1,6 +1,81 @@
+# ===============================
+# serializers.py - COMPLETE FILE
+# ===============================
+
 from rest_framework import serializers
-from .models import MenuItem, Sale, DailySale, Inventory, Supplier, InventoryOrder
-from django.utils import timezone
+from .models import *
+
+
+class UserSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = ['id', 'email', 'full_name', 'phone', 'role', 'is_active']
+
+
+class RestaurantSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Restaurant
+        fields = '__all__'
+
+
+class BranchSerializer(serializers.ModelSerializer):
+    manager_name = serializers.CharField(source='manager.full_name', read_only=True)
+    restaurant_name = serializers.CharField(source='restaurant.name', read_only=True)
+
+    class Meta:
+        model = Branch
+        fields = '__all__'
+
+
+class MenuCategorySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = MenuCategory
+        fields = '__all__'
+
+
+class MenuItemSerializer(serializers.ModelSerializer):
+    category_name = serializers.CharField(source='category.name', read_only=True)
+    price_with_tax = serializers.SerializerMethodField()
+
+    class Meta:
+        model = MenuItem
+        fields = '__all__'
+
+    def get_price_with_tax(self, obj):
+        tax = obj.price * Decimal('0.17')
+        return float(obj.price + tax)
+
+
+class CustomerSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Customer
+        fields = '__all__'
+
+
+class POSSaleItemSerializer(serializers.ModelSerializer):
+    item_name = serializers.CharField(source='menu_item.name', read_only=True)
+
+    class Meta:
+        model = POSSaleItem
+        fields = '__all__'
+
+
+class POSSaleSerializer(serializers.ModelSerializer):
+    items = POSSaleItemSerializer(many=True, read_only=True)
+    customer_name = serializers.CharField(source='customer.name', read_only=True)
+    branch_name = serializers.CharField(source='branch.name', read_only=True)
+
+    class Meta:
+        model = POSSale
+        fields = '__all__'
+
+
+class CreatePOSSaleSerializer(serializers.Serializer):
+    customer_name = serializers.CharField()
+    customer_contact = serializers.CharField()
+    payment_method = serializers.ChoiceField(choices=POSSale.PAYMENT_METHODS)
+    discount_amount = serializers.DecimalField(max_digits=12, decimal_places=2, default=0)
+    items = serializers.ListField(child=serializers.DictField())
 
 
 class SupplierSerializer(serializers.ModelSerializer):
@@ -9,75 +84,54 @@ class SupplierSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
-class InventorySerializer(serializers.ModelSerializer):
-    supplier = SupplierSerializer(read_only=True)
-    supplier_id = serializers.PrimaryKeyRelatedField(
-        queryset=Supplier.objects.all(), source='supplier', write_only=True
-    )
+class InventoryItemSerializer(serializers.ModelSerializer):
+    supplier_name = serializers.CharField(source='supplier.name', read_only=True)
+    needs_reorder = serializers.SerializerMethodField()
 
     class Meta:
-        model = Inventory
-        fields = ['id', 'item_name', 'quantity', 'reorder_level', 'unit_price', 'supplier', 'supplier_id']
+        model = InventoryItem
+        fields = '__all__'
+
+    def get_needs_reorder(self, obj):
+        return obj.quantity_in_stock <= obj.reorder_level
 
 
 class InventoryOrderSerializer(serializers.ModelSerializer):
-    supplier = SupplierSerializer(read_only=True)
-
     class Meta:
         model = InventoryOrder
         fields = '__all__'
 
 
-class MenuItemSerializer(serializers.ModelSerializer):
+class DailySalesSerializer(serializers.ModelSerializer):
     class Meta:
-        model = MenuItem
+        model = DailySales
         fields = '__all__'
 
 
-class SaleSerializer(serializers.ModelSerializer):
-    menu_item = MenuItemSerializer(read_only=True)
-    menu_item_id = serializers.PrimaryKeyRelatedField(
-        queryset=MenuItem.objects.all(), source='menu_item', write_only=True
-    )
+class BranchDailySalesSerializer(serializers.ModelSerializer):
+    branch_name = serializers.CharField(source='branch.name', read_only=True)
 
     class Meta:
-        model = Sale
-        fields = ['id', 'menu_item', 'menu_item_id', 'quantity', 'total_price', 'timestamp']
-
-    def create(self, validated_data):
-        sale = super().create(validated_data)
-        menu_item = sale.menu_item
-
-        # Reduce inventory (assuming item_name matches inventory)
-        try:
-            inventory_item = Inventory.objects.get(item_name=menu_item.name)
-            inventory_item.quantity -= sale.quantity
-            inventory_item.save()
-
-            # Trigger reorder if low
-            if inventory_item.quantity <= inventory_item.reorder_level:
-                InventoryOrder.objects.get_or_create(
-                    supplier=inventory_item.supplier,
-                    item_name=inventory_item.item_name,
-                    quantity=inventory_item.reorder_level * 2,  # reorder double the threshold
-                )
-        except Inventory.DoesNotExist:
-            pass
-
-        # Update daily sales
-        today = timezone.now().date()
-        daily_sale, created = DailySale.objects.get_or_create(date=today)
-        daily_sale.total_sales += sale.total_price
-        daily_sale.save()
-
-        # Update menu popularity
-        menu_item.popularity_score += sale.quantity
-        menu_item.save()
-
-        return sale
+        model = BranchDailySales
+        fields = '__all__'
 
 
-class DailySaleSerializer(serializers.ModelSerializer):
+class BranchForecastSerializer(serializers.ModelSerializer):
+    branch_name = serializers.CharField(source='branch.name', read_only=True)
+    trend = serializers.SerializerMethodField()
+
     class Meta:
-        model = DailySale
+        model = BranchForecast
+        fields = '__all__'
+
+    def get_trend(self, obj):
+        return 'up' if obj.predicted_growth > 0 else 'down'
+
+
+class BranchComparisonSerializer(serializers.ModelSerializer):
+    branch_1_name = serializers.CharField(source='branch_1.name', read_only=True)
+    branch_2_name = serializers.CharField(source='branch_2.name', read_only=True)
+
+    class Meta:
+        model = BranchComparison
         fields = '__all__'

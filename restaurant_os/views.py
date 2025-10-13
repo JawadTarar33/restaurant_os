@@ -15,7 +15,8 @@ from decimal import Decimal
 from .models import *
 from .serializers import *
 from .ml_service import MLService
-
+from rest_framework.views import APIView
+import requests
 ml_service = MLService()
 
 
@@ -370,8 +371,6 @@ class FinanceDashboardViewSet(viewsets.ViewSet):
         return Response({'message': f'Successfully synced {total_created} Orders.'})
 
 
-
-
 class SalesAnalyticsViewSet(viewsets.ViewSet):
     permission_classes = [IsAuthenticated]
 
@@ -521,3 +520,164 @@ class InventoryOrderViewSet(viewsets.ModelViewSet):
     queryset = InventoryOrder.objects.all()
     serializer_class = InventoryOrderSerializer
     permission_classes = [IsAuthenticated]
+
+
+class AskAIView(APIView):
+    """
+    Main entry point for AI chat functionality.
+    Forwards user queries to n8n workflow and returns AI responses.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        user_message = request.data.get("message")
+        branch_id = request.data.get("branch_id")
+        restaurant_id = request.data.get("restaurant_id")
+        
+        if not user_message:
+            return Response(
+                {"error": "message field is required"}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Prepare payload for n8n
+        payload = {
+            "user_id": request.user.id,
+            "user_email": request.user.email,
+            "user_role": request.user.role,
+            "query": user_message,
+            "branch_id": branch_id,
+            "restaurant_id": restaurant_id,
+            "context": {
+                "user_name": request.user.full_name or request.user.email,
+                "timestamp": timezone.now().isoformat()
+            }
+        }
+
+        try:
+            # Forward to n8n webhook
+            response = requests.post(
+                settings.N8N_WEBHOOK_URL,
+                json=payload,
+                headers={
+                    'X-API-Key': settings.N8N_API_KEY,  # Optional security header
+                    'Content-Type': 'application/json'
+                },
+                timeout=120  # 2 minute timeout for complex queries
+            )
+            
+            response.raise_for_status()
+            return Response(response.json(), status=response.status_code)
+            
+        except requests.exceptions.Timeout:
+            return Response(
+                {"error": "Request timed out. Please try again."},
+                status=status.HTTP_504_GATEWAY_TIMEOUT
+            )
+        except requests.exceptions.RequestException as e:
+            return Response(
+                {"error": f"Failed to connect to AI service: {str(e)}"},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE
+            )
+        except Exception as e:
+            return Response(
+                {"error": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class RunModelView(APIView):
+    """
+    Endpoint for n8n to call ML models hosted in Django.
+    This allows n8n workflows to leverage your sklearn models.
+    """
+    permission_classes = [AllowAny]  # Or use API key authentication
+
+    def post(self, request):
+        # Verify API key from n8n
+        api_key = request.headers.get('X-API-Key')
+        if api_key != settings.N8N_API_KEY:
+            return Response(
+                {"error": "Unauthorized"},
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+
+        model_type = request.data.get("model_type")
+        branch_id = request.data.get("branch_id")
+        features = request.data.get("features")
+
+        if not model_type or not branch_id:
+            return Response(
+                {"error": "model_type and branch_id are required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            if model_type == "forecast":
+                forecasts = ml_service.generate_weekly_forecast(branch_id)
+                return Response({
+                    "status": "success",
+                    "model_type": "forecast",
+                    "results": BranchForecastSerializer(forecasts, many=True).data
+                })
+
+            elif model_type == "comparison":
+                branch_2_id = request.data.get("branch_2_id")
+                if not branch_2_id:
+                    return Response(
+                        {"error": "branch_2_id required for comparison"},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+                
+                comparisons = ml_service.compare_branches_and_save(branch_id, branch_2_id)
+                return Response({
+                    "status": "success",
+                    "model_type": "comparison",
+                    "results": comparisons
+                })
+
+            elif model_type == "sales_prediction":
+                # Example: Custom prediction using features
+                from joblib import load
+                import numpy as np
+                
+                # Load your trained model
+                # model = load("models/sales_forecast.joblib")
+                # prediction = model.predict([features])
+                
+                return Response({
+                    "status": "success",
+                    "model_type": "sales_prediction",
+                    "prediction": "Implementation depends on your model"
+                })
+
+            else:
+                return Response(
+                    {"error": f"Unknown model_type: {model_type}"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        except Exception as e:
+            return Response(
+                {"error": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class ChatHistoryView(APIView):
+    """
+    Optional: Store and retrieve chat history
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        # Implement chat history retrieval
+        # You might want to create a ChatMessage model
+        return Response({
+            "history": [],
+            "message": "Chat history endpoint - implement based on your needs"
+        })
+
+    def post(self, request):
+        # Store chat message
+        return Response({"status": "saved"})

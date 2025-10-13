@@ -29,4 +29,18 @@ router.register(r'inventory', InventoryViewSet, basename='inventory')
 router.register(r'suppliers', SupplierViewSet, basename='suppliers')
 router.register(r'inventory-orders', InventoryOrderViewSet, basename='inventory-orders')
 
-urlpatterns = router.urls
+# =============================
+# AI Chat Integration (NEW)
+# =============================
+additional_patterns = [
+    # Main AI chat endpoint - called by frontend
+    path('ask-ai/', AskAIView.as_view(), name='ask-ai'),
+    
+    # ML model execution - called by n8n workflows
+    path('run-model/', RunModelView.as_view(), name='run-model'),
+    
+    # Optional: Chat history
+    path('chat-history/', ChatHistoryView.as_view(), name='chat-history'),
+]
+
+urlpatterns = router.urls + additional_patterns

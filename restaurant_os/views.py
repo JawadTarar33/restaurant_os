@@ -288,6 +288,88 @@ class FinanceDashboardViewSet(viewsets.ViewSet):
             })
 
         return Response(data)
+    
+
+    @action(detail=False, methods=['post'])
+    def sync_daily_sales(self, request):
+        """
+        Admin-only endpoint to rebuild BranchDailySales from POSSale records.
+        """
+        if not request.user.is_superuser:
+            return Response({'error': 'Permission denied'}, status=403)
+
+        from django.db.models import Sum
+        from decimal import Decimal
+        from datetime import date
+        import traceback
+
+        try:
+            branches = POSSale.objects.values_list('branch_id', flat=True).distinct()
+            sale_dates = POSSale.objects.dates('created_at', 'day', order='DESC')
+
+            total_created = 0
+            for sale_date in sale_dates:
+                for branch_id in branches:
+                    daily_sales = POSSale.objects.filter(
+                        branch_id=branch_id,
+                        created_at__date=sale_date
+                    )
+                    if daily_sales.exists():
+                        aggregates = daily_sales.aggregate(
+                            total_revenue=Sum('total'),
+                            total_discount=Sum('discount_amount')
+                        )
+
+                        total_revenue = aggregates['total_revenue'] or Decimal('0')
+                        total_discount = aggregates['total_discount'] or Decimal('0')
+                        total_transactions = daily_sales.count()
+                        avg_ticket = (total_revenue / total_transactions) if total_transactions > 0 else Decimal('0')
+                        discount_pct = (total_discount / total_revenue * 100) if total_revenue > 0 else Decimal('0')
+
+                        BranchDailySales.objects.update_or_create(
+                            branch_id=branch_id,
+                            date=sale_date,
+                            defaults={
+                                'revenue': total_revenue,
+                                'transactions': total_transactions,
+                                'customer_footfall': int(total_transactions * Decimal('1.2')),
+                                'avg_ticket_size': avg_ticket,
+                                'discount_percentage': discount_pct
+                            }
+                        )
+                        total_created += 1
+
+            return Response({'message': f'Successfully synced {total_created} BranchDailySales records.'})
+
+        except Exception as e:
+            print(traceback.format_exc())
+            return Response({'error': str(e)}, status=500)
+        
+
+
+    @action(detail=False, methods=['post'])
+    def sync_orders(self, request):
+        if not request.user.is_superuser:
+            return Response({'error': 'Permission denied'}, status=403)
+
+        total_created = 0
+        for sale in POSSale.objects.all():
+            order, created = Order.objects.get_or_create(
+                sale=sale,
+                defaults={
+                    'customer': sale.customer,
+                    'branch': sale.branch,
+                    'total_amount': sale.total,
+                    'payment_method': sale.payment_method,
+                    'created_at': sale.created_at
+                }
+            )
+            if created:
+                total_created += 1
+
+        return Response({'message': f'Successfully synced {total_created} Orders.'})
+
+
 
 
 class SalesAnalyticsViewSet(viewsets.ViewSet):

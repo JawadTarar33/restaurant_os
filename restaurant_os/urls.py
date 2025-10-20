@@ -15,6 +15,7 @@ router.register(r'menu-items', MenuItemViewSet, basename='menu-items')
 
 # POS
 router.register(r'pos', POSViewSet, basename='pos')
+router.register(r'sync', SyncManagementViewSet, basename='sync')
 
 # Finance & Analytics
 router.register(r'finance', FinanceDashboardViewSet, basename='finance')

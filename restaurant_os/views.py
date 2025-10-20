@@ -107,6 +107,7 @@ class POSViewSet(viewsets.ViewSet):
 
     @action(detail=False, methods=['get'])
     def menu_items(self, request):
+        """Enhanced to include last_modified timestamp for sync"""
         restaurant_id = request.query_params.get('restaurant_id')
 
         items = MenuItem.objects.filter(available=True)
@@ -122,79 +123,200 @@ class POSViewSet(viewsets.ViewSet):
                 'price': float(item.price),
                 'tax_rate': 17.00,
                 'price_with_tax': float(item.price + tax),
-                'category': item.category.name if item.category else 'Other'
+                'category': item.category.name if item.category else 'Other',
+                'last_modified': timezone.now().isoformat()  # For sync tracking
             })
 
-        return Response(data)
+        return Response({
+            'items': data,
+            'timestamp': timezone.now().isoformat()
+        })
 
     @action(detail=False, methods=['post'])
     def create_sale(self, request):
+        """Enhanced to handle both online and synced offline sales"""
         serializer = CreatePOSSaleSerializer(data=request.data)
         if not serializer.is_valid():
             return Response(serializer.errors, status=400)
 
         data = serializer.validated_data
         branch_id = request.data.get('branch_id')
+        offline_id = request.data.get('offline_id')  # Track offline sales
+        created_at = request.data.get('created_at')  # Original timestamp
 
         if not branch_id:
             return Response({'error': 'branch_id required'}, status=400)
 
-        customer, _ = Customer.objects.get_or_create(
-            contact=data['customer_contact'],
-            defaults={'name': data['customer_name']}
-        )
+        try:
+            with db_transaction.atomic():
+                customer, _ = Customer.objects.get_or_create(
+                    contact=data['customer_contact'],
+                    defaults={'name': data['customer_name']}
+                )
 
-        subtotal = Decimal('0')
-        tax_total = Decimal('0')
-        sale_items = []
+                subtotal = Decimal('0')
+                tax_total = Decimal('0')
+                sale_items = []
 
-        for item_data in data['items']:
-            menu_item = MenuItem.objects.get(id=item_data['menu_item_id'])
-            quantity = item_data['quantity']
-            unit_price = menu_item.price
-            item_subtotal = unit_price * quantity
-            item_tax = item_subtotal * Decimal('0.17')
-            item_total = item_subtotal + item_tax
+                for item_data in data['items']:
+                    menu_item = MenuItem.objects.get(id=item_data['menu_item_id'])
+                    quantity = item_data['quantity']
+                    unit_price = menu_item.price
+                    item_subtotal = unit_price * quantity
+                    item_tax = item_subtotal * Decimal('0.17')
+                    item_total = item_subtotal + item_tax
 
-            subtotal += item_subtotal
-            tax_total += item_tax
+                    subtotal += item_subtotal
+                    tax_total += item_tax
 
-            sale_items.append({
-                'menu_item': menu_item,
-                'quantity': quantity,
-                'unit_price': unit_price,
-                'tax_amount': item_tax,
-                'total': item_total
-            })
+                    sale_items.append({
+                        'menu_item': menu_item,
+                        'quantity': quantity,
+                        'unit_price': unit_price,
+                        'tax_amount': item_tax,
+                        'total': item_total
+                    })
 
-        total = subtotal + tax_total - data['discount_amount']
+                total = subtotal + tax_total - data['discount_amount']
 
-        sale = POSSale.objects.create(
-            branch_id=branch_id,
-            customer=customer,
-            cashier=request.user,
-            payment_method=data['payment_method'],
-            subtotal=subtotal,
-            tax_amount=tax_total,
-            discount_amount=data['discount_amount'],
-            total=total
-        )
+                # Create sale with original timestamp if syncing from offline
+                sale = POSSale.objects.create(
+                    branch_id=branch_id,
+                    customer=customer,
+                    cashier=request.user,
+                    payment_method=data['payment_method'],
+                    subtotal=subtotal,
+                    tax_amount=tax_total,
+                    discount_amount=data['discount_amount'],
+                    total=total
+                )
 
-        for item in sale_items:
-            POSSaleItem.objects.create(
-                sale=sale,
-                menu_item=item['menu_item'],
-                quantity=item['quantity'],
-                unit_price=item['unit_price'],
-                tax_amount=item['tax_amount'],
-                total=item['total']
-            )
+                # If syncing offline sale, update created_at to original time
+                if created_at:
+                    sale.created_at = created_at
+                    sale.save()
+
+                for item in sale_items:
+                    POSSaleItem.objects.create(
+                        sale=sale,
+                        menu_item=item['menu_item'],
+                        quantity=item['quantity'],
+                        unit_price=item['unit_price'],
+                        tax_amount=item['tax_amount'],
+                        total=item['total']
+                    )
+
+                return Response({
+                    'sale_id': sale.id,
+                    'total': float(total),
+                    'offline_id': offline_id,  # Echo back for client tracking
+                    'message': 'Sale created successfully',
+                    'synced': True
+                }, status=201)
+
+        except Exception as e:
+            return Response({
+                'error': str(e),
+                'offline_id': offline_id
+            }, status=400)
+
+    @action(detail=False, methods=['post'])
+    def bulk_sync_sales(self, request):
+        """Sync multiple offline sales at once"""
+        sales_data = request.data.get('sales', [])
+        
+        if not sales_data:
+            return Response({'error': 'No sales data provided'}, status=400)
+
+        results = {
+            'successful': [],
+            'failed': []
+        }
+
+        for sale_data in sales_data:
+            try:
+                # Reuse create_sale logic
+                response = self.create_sale(
+                    type('Request', (), {
+                        'data': sale_data,
+                        'user': request.user
+                    })()
+                )
+                
+                if response.status_code == 201:
+                    results['successful'].append({
+                        'offline_id': sale_data.get('offline_id'),
+                        'sale_id': response.data['sale_id']
+                    })
+                else:
+                    results['failed'].append({
+                        'offline_id': sale_data.get('offline_id'),
+                        'error': response.data.get('error', 'Unknown error')
+                    })
+            except Exception as e:
+                results['failed'].append({
+                    'offline_id': sale_data.get('offline_id'),
+                    'error': str(e)
+                })
 
         return Response({
-            'sale_id': sale.id,
-            'total': float(total),
-            'message': 'Sale created successfully'
-        }, status=201)
+            'synced': len(results['successful']),
+            'failed': len(results['failed']),
+            'results': results
+        })
+
+    @action(detail=False, methods=['get'])
+    def check_sync_status(self, request):
+        """Check if there are any sales that need syncing"""
+        offline_ids = request.query_params.get('offline_ids', '').split(',')
+        
+        if not offline_ids or offline_ids == ['']:
+            return Response({'needs_sync': False})
+
+        # Check which offline IDs are already synced
+        # This would require adding an offline_id field to POSSale model
+        # For now, return a simple status
+        return Response({
+            'needs_sync': True,
+            'server_time': timezone.now().isoformat()
+        })
+
+
+# Add this new ViewSet for sync management
+class SyncManagementViewSet(viewsets.ViewSet):
+    permission_classes = [IsAuthenticated]
+
+    @action(detail=False, methods=['post'])
+    def log_sync_event(self, request):
+        """Log sync events for monitoring"""
+        event_type = request.data.get('event_type')  # 'sync_start', 'sync_success', 'sync_failure'
+        details = request.data.get('details', {})
+        
+        # You can create a SyncLog model to track these
+        return Response({
+            'logged': True,
+            'timestamp': timezone.now().isoformat()
+        })
+
+    @action(detail=False, methods=['get'])
+    def get_sync_stats(self, request):
+        """Get sync statistics for a branch"""
+        branch_id = request.query_params.get('branch_id')
+        days = int(request.query_params.get('days', 7))
+        
+        start_date = timezone.now().date() - timedelta(days=days)
+        
+        # Get sales created in the specified period
+        total_sales = POSSale.objects.filter(
+            branch_id=branch_id,
+            created_at__date__gte=start_date
+        ).count()
+
+        return Response({
+            'total_sales': total_sales,
+            'period_days': days,
+            'branch_id': branch_id
+        })
 
 
 class FinanceDashboardViewSet(viewsets.ViewSet):

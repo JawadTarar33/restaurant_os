@@ -176,10 +176,46 @@ class POSSale(models.Model):
     discount_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     total = models.DecimalField(max_digits=12, decimal_places=2)
     created_at = models.DateTimeField(auto_now_add=True)
+    
+    # NEW: Offline support fields
+    offline_id = models.CharField(max_length=100, blank=True, null=True, unique=True, db_index=True)
+    synced_at = models.DateTimeField(blank=True, null=True)
+    is_offline_sale = models.BooleanField(default=False)
 
     def __str__(self):
         return f"Sale #{self.id} - {self.branch.name}"
 
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['offline_id']),
+            models.Index(fields=['branch', 'created_at']),
+        ]
+
+
+# NEW: Sync Log Model
+class SyncLog(models.Model):
+    EVENT_TYPES = [
+        ('sync_start', 'Sync Started'),
+        ('sync_success', 'Sync Success'),
+        ('sync_failure', 'Sync Failure'),
+        ('auto_sync', 'Auto Sync'),
+        ('manual_sync', 'Manual Sync'),
+    ]
+
+    branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name='sync_logs', null=True, blank=True)
+    user = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
+    event_type = models.CharField(max_length=20, choices=EVENT_TYPES)
+    sales_synced = models.IntegerField(default=0)
+    sales_failed = models.IntegerField(default=0)
+    details = models.JSONField(default=dict, blank=True)
+    timestamp = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-timestamp']
+
+    def __str__(self):
+        return f"{self.event_type} - {self.timestamp}"
 
 class POSSaleItem(models.Model):
     sale = models.ForeignKey(POSSale, on_delete=models.CASCADE, related_name='items')

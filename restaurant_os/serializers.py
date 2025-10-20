@@ -64,9 +64,26 @@ class POSSaleSerializer(serializers.ModelSerializer):
     items = POSSaleItemSerializer(many=True, read_only=True)
     customer_name = serializers.CharField(source='customer.name', read_only=True)
     branch_name = serializers.CharField(source='branch.name', read_only=True)
+    sync_status = serializers.SerializerMethodField()
 
     class Meta:
         model = POSSale
+        fields = '__all__'
+
+    def get_sync_status(self, obj):
+        if obj.is_offline_sale and obj.synced_at:
+            return 'synced'
+        elif obj.is_offline_sale and not obj.synced_at:
+            return 'pending'
+        return 'online'
+
+
+class SyncLogSerializer(serializers.ModelSerializer):
+    branch_name = serializers.CharField(source='branch.name', read_only=True)
+    user_name = serializers.CharField(source='user.full_name', read_only=True)
+
+    class Meta:
+        model = SyncLog
         fields = '__all__'
 
 

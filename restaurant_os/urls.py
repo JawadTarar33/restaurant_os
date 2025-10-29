@@ -29,6 +29,8 @@ router.register(r'ai-comparison', AIComparisonViewSet, basename='ai-comparison')
 router.register(r'inventory', InventoryViewSet, basename='inventory')
 router.register(r'suppliers', SupplierViewSet, basename='suppliers')
 router.register(r'inventory-orders', InventoryOrderViewSet, basename='inventory-orders')
+router.register(r'recipes', RecipeViewSet, basename='recipes')
+router.register(r'inventory-transactions', InventoryTransactionViewSet, basename='inventory-transactions')
 
 # =============================
 # AI Chat Integration (NEW)

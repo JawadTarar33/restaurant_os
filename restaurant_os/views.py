@@ -1,7 +1,7 @@
 # ===============================
 # views.py - COMPLETE FILE
 # ===============================
-
+from django.db import transaction 
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -134,21 +134,23 @@ class POSViewSet(viewsets.ViewSet):
 
     @action(detail=False, methods=['post'])
     def create_sale(self, request):
-        """Enhanced to handle both online and synced offline sales"""
+        """Enhanced to include automatic inventory deduction"""
         serializer = CreatePOSSaleSerializer(data=request.data)
         if not serializer.is_valid():
             return Response(serializer.errors, status=400)
 
         data = serializer.validated_data
         branch_id = request.data.get('branch_id')
-        offline_id = request.data.get('offline_id')  # Track offline sales
-        created_at = request.data.get('created_at')  # Original timestamp
+        
+        # Add inventory check flag (optional)
+        skip_inventory_check = request.data.get('skip_inventory_check', False)
 
         if not branch_id:
             return Response({'error': 'branch_id required'}, status=400)
 
         try:
-            with db_transaction.atomic():
+            with transaction.atomic():
+                # Create customer
                 customer, _ = Customer.objects.get_or_create(
                     contact=data['customer_contact'],
                     defaults={'name': data['customer_name']}
@@ -158,6 +160,23 @@ class POSViewSet(viewsets.ViewSet):
                 tax_total = Decimal('0')
                 sale_items = []
 
+                # Check inventory availability BEFORE creating sale
+                if not skip_inventory_check:
+                    for item_data in data['items']:
+                        menu_item = MenuItem.objects.get(id=item_data['menu_item_id'])
+                        quantity = item_data['quantity']
+                        
+                        if hasattr(menu_item, 'recipe') and menu_item.recipe.is_active:
+                            is_available, missing = menu_item.recipe.check_availability(quantity)
+                            
+                            if not is_available:
+                                return Response({
+                                    'error': 'Insufficient inventory',
+                                    'item': menu_item.name,
+                                    'missing_ingredients': missing
+                                }, status=400)
+
+                # Calculate totals and prepare sale items
                 for item_data in data['items']:
                     menu_item = MenuItem.objects.get(id=item_data['menu_item_id'])
                     quantity = item_data['quantity']
@@ -179,7 +198,7 @@ class POSViewSet(viewsets.ViewSet):
 
                 total = subtotal + tax_total - data['discount_amount']
 
-                # Create sale with original timestamp if syncing from offline
+                # Create POS Sale
                 sale = POSSale.objects.create(
                     branch_id=branch_id,
                     customer=customer,
@@ -191,11 +210,7 @@ class POSViewSet(viewsets.ViewSet):
                     total=total
                 )
 
-                # If syncing offline sale, update created_at to original time
-                if created_at:
-                    sale.created_at = created_at
-                    sale.save()
-
+                # Create sale items
                 for item in sale_items:
                     POSSaleItem.objects.create(
                         sale=sale,
@@ -206,20 +221,24 @@ class POSViewSet(viewsets.ViewSet):
                         total=item['total']
                     )
 
+                # Process inventory deductions
+                success, result = sale.process_inventory_deductions()
+                
+                if not success:
+                    raise ValueError(result)
+
                 return Response({
                     'sale_id': sale.id,
                     'total': float(total),
-                    'offline_id': offline_id,  # Echo back for client tracking
                     'message': 'Sale created successfully',
-                    'synced': True
+                    'inventory_deductions': result
                 }, status=201)
 
         except Exception as e:
             return Response({
-                'error': str(e),
-                'offline_id': offline_id
+                'error': str(e)
             }, status=400)
-
+         
     @action(detail=False, methods=['post'])
     def bulk_sync_sales(self, request):
         """Sync multiple offline sales at once"""
@@ -803,3 +822,94 @@ class ChatHistoryView(APIView):
     def post(self, request):
         # Store chat message
         return Response({"status": "saved"})
+    
+
+class RecipeViewSet(viewsets.ModelViewSet):
+    queryset = Recipe.objects.all()
+    serializer_class = RecipeSerializer
+    permission_classes = [IsAuthenticated]
+
+    @action(detail=True, methods=['get'])
+    def check_availability(self, request, pk=None):
+        """Check if recipe ingredients are available"""
+        recipe = self.get_object()
+        quantity = int(request.query_params.get('quantity', 1))
+        
+        is_available, missing = recipe.check_availability(quantity)
+        
+        return Response({
+            'available': is_available,
+            'quantity_requested': quantity,
+            'missing_items': missing,
+            'total_cost': float(recipe.get_total_cost() * quantity)
+        })
+
+    @action(detail=False, methods=['get'])
+    def unavailable_items(self, request):
+        """Get all menu items that can't be made due to low inventory"""
+        unavailable = []
+        
+        for recipe in Recipe.objects.filter(is_active=True):
+            is_available, missing = recipe.check_availability()
+            
+            if not is_available:
+                unavailable.append({
+                    'menu_item': recipe.menu_item.name,
+                    'recipe_id': recipe.id,
+                    'missing_ingredients': missing
+                })
+        
+        return Response(unavailable)
+
+
+class InventoryTransactionViewSet(viewsets.ReadOnlyModelViewSet):
+    queryset = InventoryTransaction.objects.all()
+    serializer_class = InventoryTransactionSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        
+        # Filter by inventory item
+        item_id = self.request.query_params.get('inventory_item_id')
+        if item_id:
+            queryset = queryset.filter(inventory_item_id=item_id)
+        
+        # Filter by transaction type
+        transaction_type = self.request.query_params.get('transaction_type')
+        if transaction_type:
+            queryset = queryset.filter(transaction_type=transaction_type)
+        
+        # Filter by date range
+        start_date = self.request.query_params.get('start_date')
+        end_date = self.request.query_params.get('end_date')
+        if start_date and end_date:
+            queryset = queryset.filter(
+                created_at__date__range=[start_date, end_date]
+            )
+        
+        return queryset
+
+    @action(detail=False, methods=['get'])
+    def sales_impact(self, request):
+        """Get inventory impact from sales over a period"""
+        from django.db.models import Sum
+        
+        days = int(request.query_params.get('days', 7))
+        start_date = timezone.now() - timedelta(days=days)
+        
+        impact = InventoryTransaction.objects.filter(
+            transaction_type='sale',
+            created_at__gte=start_date
+        ).values(
+            'inventory_item__name',
+            'inventory_item__unit'
+        ).annotate(
+            total_used=Sum('quantity')
+        ).order_by('-total_used')
+        
+        return Response({
+            'period_days': days,
+            'items': list(impact)
+        })
+

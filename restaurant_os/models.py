@@ -7,7 +7,7 @@ from django.utils import timezone
 from decimal import Decimal
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
 from django.conf import settings
-
+from django.db import transaction
 
 # ============================
 #  User & Role Management
@@ -108,6 +108,9 @@ class MenuItem(models.Model):
         return f"{self.name} ({self.restaurant.name})"
 
 
+
+
+
 # ============================
 # Orders & Sales (Existing)
 # ============================
@@ -184,6 +187,63 @@ class POSSale(models.Model):
 
     def __str__(self):
         return f"Sale #{self.id} - {self.branch.name}"
+    
+    def process_inventory_deductions(self):
+        """
+        Process inventory deductions for all items in this sale
+        Returns (success, errors)
+        """
+        errors = []
+        deductions_made = []
+        
+        try:
+            with transaction.atomic():
+                for sale_item in self.items.all():
+                    menu_item = sale_item.menu_item
+                    
+                    # Check if menu item has a recipe
+                    if hasattr(menu_item, 'recipe') and menu_item.recipe.is_active:
+                        recipe = menu_item.recipe
+                        
+                        # Check availability first
+                        is_available, missing = recipe.check_availability(sale_item.quantity)
+                        
+                        if not is_available:
+                            error_msg = f"Insufficient ingredients for {menu_item.name}: "
+                            error_msg += ", ".join([
+                                f"{item['item']} (need {item['required']}{item['unit']}, have {item['available']}{item['unit']})"
+                                for item in missing
+                            ])
+                            errors.append(error_msg)
+                            continue
+                        
+                        # Deduct ingredients
+                        for ingredient in recipe.ingredients.all():
+                            if not ingredient.is_optional:
+                                qty_to_deduct = ingredient.quantity * sale_item.quantity
+                                
+                                ingredient.inventory_item.deduct_quantity(
+                                    quantity=qty_to_deduct,
+                                    transaction_type='sale',
+                                    user=self.cashier,
+                                    pos_sale=self,
+                                    notes=f"Sale #{self.id}: {sale_item.quantity}x {menu_item.name}"
+                                )
+                                
+                                deductions_made.append({
+                                    'item': ingredient.inventory_item.name,
+                                    'quantity': float(qty_to_deduct),
+                                    'unit': ingredient.unit
+                                })
+                
+                if errors:
+                    # Rollback will happen automatically due to transaction.atomic()
+                    raise ValueError("Inventory deduction failed: " + "; ".join(errors))
+                
+                return (True, deductions_made)
+                
+        except Exception as e:
+            return (False, str(e))
 
     class Meta:
         ordering = ['-created_at']
@@ -251,9 +311,70 @@ class InventoryItem(models.Model):
     reorder_level = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     reorder_quantity = models.DecimalField(max_digits=10, decimal_places=2, default=10)
     last_restock_date = models.DateField(blank=True, null=True)
+    unit_price = models.DecimalField(
+        max_digits=10, 
+        decimal_places=2, 
+        null=True, 
+        blank=True,
+        help_text="Cost per unit"
+    )
+    
+    def deduct_quantity(self, quantity, transaction_type='sale', user=None, pos_sale=None, notes=None):
+        """
+        Safely deduct quantity and create transaction record
+        """
+        if quantity <= 0:
+            raise ValueError("Quantity must be positive")
+        
+        if self.quantity_in_stock < quantity:
+            raise ValueError(
+                f"Insufficient stock: {self.name} has {self.quantity_in_stock}{self.unit}, "
+                f"but {quantity}{self.unit} required"
+            )
+        
+        previous_qty = self.quantity_in_stock
+        self.quantity_in_stock -= quantity
+        self.save(update_fields=['quantity_in_stock'])
+        
+        # Create transaction record
+        InventoryTransaction.objects.create(
+            inventory_item=self,
+            transaction_type=transaction_type,
+            quantity=quantity,
+            unit=self.unit,
+            pos_sale=pos_sale,
+            previous_quantity=previous_qty,
+            new_quantity=self.quantity_in_stock,
+            performed_by=user,
+            notes=notes
+        )
+        
+        return self.quantity_in_stock
 
-    def __str__(self):
-        return f"{self.name} ({self.quantity_in_stock}{self.unit})"
+    def add_quantity(self, quantity, transaction_type='restock', user=None, inventory_order=None, notes=None):
+        """
+        Add quantity and create transaction record
+        """
+        if quantity <= 0:
+            raise ValueError("Quantity must be positive")
+        
+        previous_qty = self.quantity_in_stock
+        self.quantity_in_stock += quantity
+        self.save(update_fields=['quantity_in_stock'])
+        
+        InventoryTransaction.objects.create(
+            inventory_item=self,
+            transaction_type=transaction_type,
+            quantity=quantity,
+            unit=self.unit,
+            inventory_order=inventory_order,
+            previous_quantity=previous_qty,
+            new_quantity=self.quantity_in_stock,
+            performed_by=user,
+            notes=notes
+        )
+        
+        return self.quantity_in_stock
 
 
 class InventoryUsage(models.Model):
@@ -285,6 +406,157 @@ class InventoryOrder(models.Model):
     def __str__(self):
         return f"Order {self.id} - {self.inventory_item.name} ({self.status})"
 
+
+class Recipe(models.Model):
+    """
+    Defines what ingredients are needed to make a menu item
+    """
+    menu_item = models.OneToOneField(
+        MenuItem, 
+        on_delete=models.CASCADE, 
+        related_name='recipe'
+    )
+    name = models.CharField(max_length=200)
+    description = models.TextField(blank=True, null=True)
+    preparation_time = models.IntegerField(help_text="Time in minutes", default=0)
+    cooking_time = models.IntegerField(help_text="Time in minutes", default=0)
+    servings = models.IntegerField(default=1)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"Recipe: {self.menu_item.name}"
+
+    def get_total_cost(self):
+        """Calculate total cost of all ingredients"""
+        total = Decimal('0')
+        for ingredient in self.ingredients.all():
+            if ingredient.inventory_item.unit_price:
+                total += (ingredient.quantity * ingredient.inventory_item.unit_price)
+        return total
+
+    def check_availability(self, quantity=1):
+        """
+        Check if enough inventory exists to make this recipe
+        Returns (is_available, missing_items)
+        """
+        missing_items = []
+        
+        for ingredient in self.ingredients.all():
+            required_qty = ingredient.quantity * quantity
+            available_qty = ingredient.inventory_item.quantity_in_stock
+            
+            if available_qty < required_qty:
+                missing_items.append({
+                    'item': ingredient.inventory_item.name,
+                    'required': float(required_qty),
+                    'available': float(available_qty),
+                    'shortage': float(required_qty - available_qty),
+                    'unit': ingredient.inventory_item.unit
+                })
+        
+        return (len(missing_items) == 0, missing_items)
+
+
+class RecipeIngredient(models.Model):
+    """
+    Defines the quantity of each ingredient needed for a recipe
+    """
+    recipe = models.ForeignKey(
+        Recipe, 
+        on_delete=models.CASCADE, 
+        related_name='ingredients'
+    )
+    inventory_item = models.ForeignKey(
+        InventoryItem, 
+        on_delete=models.CASCADE,
+        related_name='recipe_usages'
+    )
+    quantity = models.DecimalField(
+        max_digits=10, 
+        decimal_places=3,
+        help_text="Quantity needed per serving"
+    )
+    unit = models.CharField(
+        max_length=20,
+        help_text="Should match inventory item unit"
+    )
+    is_optional = models.BooleanField(default=False)
+    notes = models.TextField(blank=True, null=True)
+
+    class Meta:
+        unique_together = ['recipe', 'inventory_item']
+        ordering = ['recipe', 'inventory_item']
+
+    def __str__(self):
+        return f"{self.recipe.menu_item.name}: {self.quantity}{self.unit} {self.inventory_item.name}"
+
+    def save(self, *args, **kwargs):
+        # Auto-set unit from inventory item if not specified
+        if not self.unit:
+            self.unit = self.inventory_item.unit
+        super().save(*args, **kwargs)
+
+
+class InventoryTransaction(models.Model):
+    """
+    Track all inventory movements for auditing
+    """
+    TRANSACTION_TYPES = [
+        ('sale', 'Sale Deduction'),
+        ('restock', 'Restocking'),
+        ('adjustment', 'Manual Adjustment'),
+        ('waste', 'Waste/Spoilage'),
+        ('return', 'Return to Supplier'),
+    ]
+
+    inventory_item = models.ForeignKey(
+        InventoryItem,
+        on_delete=models.CASCADE,
+        related_name='transactions'
+    )
+    transaction_type = models.CharField(max_length=20, choices=TRANSACTION_TYPES)
+    quantity = models.DecimalField(max_digits=10, decimal_places=3)
+    unit = models.CharField(max_length=20)
+    
+    # Reference to what caused this transaction
+    pos_sale = models.ForeignKey(
+        'POSSale', 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        blank=True,
+        related_name='inventory_transactions'
+    )
+    inventory_order = models.ForeignKey(
+        'InventoryOrder',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='transactions'
+    )
+    
+    previous_quantity = models.DecimalField(max_digits=10, decimal_places=3)
+    new_quantity = models.DecimalField(max_digits=10, decimal_places=3)
+    
+    performed_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='inventory_transactions'
+    )
+    notes = models.TextField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['inventory_item', 'created_at']),
+            models.Index(fields=['transaction_type', 'created_at']),
+        ]
+
+    def __str__(self):
+        return f"{self.transaction_type}: {self.quantity}{self.unit} {self.inventory_item.name}"
 
 # ============================
 # Daily Sales & Analytics

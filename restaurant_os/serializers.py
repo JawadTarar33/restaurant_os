@@ -152,3 +152,53 @@ class BranchComparisonSerializer(serializers.ModelSerializer):
     class Meta:
         model = BranchComparison
         fields = '__all__'
+
+
+class RecipeIngredientSerializer(serializers.ModelSerializer):
+    inventory_item_name = serializers.CharField(source='inventory_item.name', read_only=True)
+    inventory_item_stock = serializers.DecimalField(
+        source='inventory_item.quantity_in_stock', 
+        max_digits=10, 
+        decimal_places=3,
+        read_only=True
+    )
+    total_cost = serializers.SerializerMethodField()
+
+    class Meta:
+        model = RecipeIngredient
+        fields = '__all__'
+
+    def get_total_cost(self, obj):
+        if obj.inventory_item.unit_price:
+            return float(obj.quantity * obj.inventory_item.unit_price)
+        return 0
+
+
+class RecipeSerializer(serializers.ModelSerializer):
+    ingredients = RecipeIngredientSerializer(many=True, read_only=True)
+    menu_item_name = serializers.CharField(source='menu_item.name', read_only=True)
+    total_cost = serializers.SerializerMethodField()
+    availability_status = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Recipe
+        fields = '__all__'
+
+    def get_total_cost(self, obj):
+        return float(obj.get_total_cost())
+
+    def get_availability_status(self, obj):
+        is_available, missing = obj.check_availability()
+        return {
+            'available': is_available,
+            'missing_items': missing
+        }
+
+
+class InventoryTransactionSerializer(serializers.ModelSerializer):
+    inventory_item_name = serializers.CharField(source='inventory_item.name', read_only=True)
+    performed_by_name = serializers.CharField(source='performed_by.full_name', read_only=True)
+
+    class Meta:
+        model = InventoryTransaction
+        fields = '__all__'

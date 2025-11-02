@@ -11,6 +11,7 @@ router.register(r'auth', AuthViewSet, basename='auth')
 # Core Management
 router.register(r'restaurants', RestaurantViewSet, basename='restaurants')
 router.register(r'branches', BranchViewSet, basename='branches')
+router.register(r'categories', CategoryViewSet, basename='categories')
 router.register(r'menu-items', MenuItemViewSet, basename='menu-items')
 
 # POS

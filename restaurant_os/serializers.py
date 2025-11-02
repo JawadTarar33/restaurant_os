@@ -1,25 +1,33 @@
 # ===============================
-# serializers.py - COMPLETE FILE
+# serializers.py - FULLY UPDATED
 # ===============================
 
 from rest_framework import serializers
+from decimal import Decimal
 from .models import *
 
 
+# =========================
+# USER & AUTH
+# =========================
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = ['id', 'email', 'full_name', 'phone', 'role', 'is_active']
 
 
+# =========================
+# RESTAURANT STRUCTURE
+# =========================
 class RestaurantSerializer(serializers.ModelSerializer):
+    owner_name = serializers.CharField(source='owner.full_name', read_only=True)
+
     class Meta:
         model = Restaurant
         fields = '__all__'
 
 
 class BranchSerializer(serializers.ModelSerializer):
-    manager_name = serializers.CharField(source='manager.full_name', read_only=True)
     restaurant_name = serializers.CharField(source='restaurant.name', read_only=True)
 
     class Meta:
@@ -27,14 +35,17 @@ class BranchSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
-class MenuCategorySerializer(serializers.ModelSerializer):
+class CategorySerializer(serializers.ModelSerializer):
+    restaurant_name = serializers.CharField(source='restaurant.name', read_only=True)
+
     class Meta:
-        model = MenuCategory
+        model = Category
         fields = '__all__'
 
 
 class MenuItemSerializer(serializers.ModelSerializer):
     category_name = serializers.CharField(source='category.name', read_only=True)
+    restaurant_name = serializers.CharField(source='restaurant.name', read_only=True)
     price_with_tax = serializers.SerializerMethodField()
 
     class Meta:
@@ -42,10 +53,13 @@ class MenuItemSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
     def get_price_with_tax(self, obj):
-        tax = obj.price * Decimal('0.17')
-        return float(obj.price + tax)
+        tax_rate = obj.restaurant.tax_rate / 100 if obj.restaurant else Decimal('0')
+        return float(obj.price + (obj.price * tax_rate))
 
 
+# =========================
+# CUSTOMER & POS
+# =========================
 class CustomerSerializer(serializers.ModelSerializer):
     class Meta:
         model = Customer
@@ -62,28 +76,12 @@ class POSSaleItemSerializer(serializers.ModelSerializer):
 
 class POSSaleSerializer(serializers.ModelSerializer):
     items = POSSaleItemSerializer(many=True, read_only=True)
-    customer_name = serializers.CharField(source='customer.name', read_only=True)
     branch_name = serializers.CharField(source='branch.name', read_only=True)
-    sync_status = serializers.SerializerMethodField()
+    customer_name = serializers.CharField(source='customer.name', read_only=True)
+    cashier_name = serializers.CharField(source='cashier.full_name', read_only=True)
 
     class Meta:
         model = POSSale
-        fields = '__all__'
-
-    def get_sync_status(self, obj):
-        if obj.is_offline_sale and obj.synced_at:
-            return 'synced'
-        elif obj.is_offline_sale and not obj.synced_at:
-            return 'pending'
-        return 'online'
-
-
-class SyncLogSerializer(serializers.ModelSerializer):
-    branch_name = serializers.CharField(source='branch.name', read_only=True)
-    user_name = serializers.CharField(source='user.full_name', read_only=True)
-
-    class Meta:
-        model = SyncLog
         fields = '__all__'
 
 
@@ -95,36 +93,9 @@ class CreatePOSSaleSerializer(serializers.Serializer):
     items = serializers.ListField(child=serializers.DictField())
 
 
-class SupplierSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Supplier
-        fields = '__all__'
-
-
-class InventoryItemSerializer(serializers.ModelSerializer):
-    supplier_name = serializers.CharField(source='supplier.name', read_only=True)
-    needs_reorder = serializers.SerializerMethodField()
-
-    class Meta:
-        model = InventoryItem
-        fields = '__all__'
-
-    def get_needs_reorder(self, obj):
-        return obj.quantity_in_stock <= obj.reorder_level
-
-
-class InventoryOrderSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = InventoryOrder
-        fields = '__all__'
-
-
-class DailySalesSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = DailySales
-        fields = '__all__'
-
-
+# =========================
+# SALES ANALYTICS & DASHBOARD
+# =========================
 class BranchDailySalesSerializer(serializers.ModelSerializer):
     branch_name = serializers.CharField(source='branch.name', read_only=True)
 
@@ -154,11 +125,67 @@ class BranchComparisonSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
+# =========================
+# SUPPLIERS & INVENTORY
+# =========================
+class SupplierSerializer(serializers.ModelSerializer):
+    restaurant_name = serializers.CharField(source='restaurant.name', read_only=True)
+
+    class Meta:
+        model = Supplier
+        fields = '__all__'
+
+
+class InventoryItemSerializer(serializers.ModelSerializer):
+    supplier_name = serializers.CharField(source='supplier.name', read_only=True)
+    restaurant_name = serializers.CharField(source='restaurant.name', read_only=True)
+    needs_reorder = serializers.SerializerMethodField()
+
+    class Meta:
+        model = InventoryItem
+        fields = '__all__'
+
+    def get_needs_reorder(self, obj):
+        return obj.quantity_in_stock <= obj.reorder_level
+
+
+class InventoryTransactionSerializer(serializers.ModelSerializer):
+    inventory_item_name = serializers.CharField(source='inventory_item.name', read_only=True)
+    performed_by_name = serializers.CharField(source='performed_by.full_name', read_only=True)
+
+    class Meta:
+        model = InventoryTransaction
+        fields = '__all__'
+
+
+
+class InventoryOrderItemSerializer(serializers.ModelSerializer):
+    inventory_item_name = serializers.CharField(source='inventory_item.name', read_only=True)
+
+    class Meta:
+        model = InventoryOrderItem
+        fields = '__all__'
+
+
+class InventoryOrderSerializer(serializers.ModelSerializer):
+    supplier_name = serializers.CharField(source='supplier.name', read_only=True)
+    branch_name = serializers.CharField(source='branch.name', read_only=True)
+    created_by_name = serializers.CharField(source='created_by.full_name', read_only=True)
+    items = InventoryOrderItemSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = InventoryOrder
+        fields = '__all__'
+
+
+# =========================
+# RECIPES
+# =========================
 class RecipeIngredientSerializer(serializers.ModelSerializer):
     inventory_item_name = serializers.CharField(source='inventory_item.name', read_only=True)
     inventory_item_stock = serializers.DecimalField(
-        source='inventory_item.quantity_in_stock', 
-        max_digits=10, 
+        source='inventory_item.quantity_in_stock',
+        max_digits=10,
         decimal_places=3,
         read_only=True
     )
@@ -193,12 +220,3 @@ class RecipeSerializer(serializers.ModelSerializer):
             'available': is_available,
             'missing_items': missing
         }
-
-
-class InventoryTransactionSerializer(serializers.ModelSerializer):
-    inventory_item_name = serializers.CharField(source='inventory_item.name', read_only=True)
-    performed_by_name = serializers.CharField(source='performed_by.full_name', read_only=True)
-
-    class Meta:
-        model = InventoryTransaction
-        fields = '__all__'

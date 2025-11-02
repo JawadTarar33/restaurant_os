@@ -1,6 +1,14 @@
-#To create database tables and columns
-  python manage.py makemigrations
-  python manage.py migrate
+## 🚀 Setup & Run Instructions
 
-#To run the server
-  python manage.py runserver
+### 🧩 Step 1 — Create Database Tables and Columns
+Run the following commands to generate and apply migrations:
+
+```bash
+python manage.py makemigrations
+python manage.py migrate
+```
+To start the developments server
+
+```bash
+python manage.py runserver
+```

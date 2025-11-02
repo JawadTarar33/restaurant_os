@@ -7,7 +7,7 @@ Run the following commands to generate and apply migrations:
 python manage.py makemigrations
 python manage.py migrate
 ```
-To start the developments server
+### 🧩 Step  — Start the developments server
 
 ```bash
 python manage.py runserver

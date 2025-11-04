@@ -6,21 +6,18 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
-from django.contrib.auth import authenticate
-from rest_framework.authtoken.models import Token
+from rest_framework_simplejwt.tokens import RefreshToken, TokenError
 from django.db.models import Sum, Avg, Count, F, Q
 from django.utils import timezone
 from datetime import timedelta, date
 from decimal import Decimal
 from .models import *
-from .models import Category
 from .serializers import *
 from .ml_service import MLService
 from rest_framework.views import APIView
 import requests
 from django.conf import settings
 import traceback
-from django.db import models
 
 ml_service = MLService()
 
@@ -40,8 +37,6 @@ class IsOwnerOrAssignedStaff(IsAuthenticated):
         if not super().has_permission(request, view):
             return False
         return request.user.role in ['owner', 'staff', 'manager']
-
-
 # ===============================
 # HELPER MIXIN FOR ACCESS CONTROL
 # ===============================
@@ -85,64 +80,12 @@ class BranchAccessMixin:
         
         return Restaurant.objects.none()
 
-
 # ===============================
 # AUTHENTICATION
 # ===============================
+
 class AuthViewSet(viewsets.ViewSet):
     permission_classes = [AllowAny]
-
-    @action(detail=False, methods=['post'])
-    def login(self, request):
-        """User login - returns token and permissions"""
-        email = request.data.get('email')
-        password = request.data.get('password')
-        
-        if not email or not password:
-            return Response({
-                'error': 'Email and password are required'
-            }, status=400)
-        
-        user = User.objects.filter(email=email).first()
-        if user and user.check_password(password):
-            token, _ = Token.objects.get_or_create(user=user)
-            
-            # Get user's assigned branches
-            assigned_branches = []
-            accessible_restaurants = []
-            
-            if user.role == 'owner':
-                restaurants = Restaurant.objects.filter(owner=user)
-                accessible_restaurants = list(restaurants.values('id', 'name'))
-                branches = Branch.objects.filter(restaurant__owner=user, is_active=True)
-                assigned_branches = list(branches.values('id', 'branch_name', 'restaurant__name', 'city'))
-            elif user.role in ['staff', 'manager']:
-                assigned_branches = list(
-                    user.assigned_branches.filter(is_active=True).values(
-                        'id', 'name', 'restaurant__name', 'city', 'restaurant_id'
-                    )
-                )
-                restaurant_ids = user.assigned_branches.values_list('restaurant_id', flat=True).distinct()
-                accessible_restaurants = list(
-                    Restaurant.objects.filter(id__in=restaurant_ids).values('id', 'name')
-                )
-            
-            return Response({
-                'token': token.key,
-                'user': UserSerializer(user).data,
-                'assigned_branches': assigned_branches,
-                'accessible_restaurants': accessible_restaurants,
-                'permissions': {
-                    'can_create_restaurant': user.role == 'owner',
-                    'can_create_branch': user.role == 'owner',
-                    'can_view_all_branches': user.role == 'owner',
-                    'can_invite_staff': user.role == 'owner',
-                    'assigned_branch_count': len(assigned_branches),
-                    'role': user.role
-                }
-            })
-        
-        return Response({'error': 'Invalid credentials'}, status=400)
 
     @action(detail=False, methods=['post'])
     def register(self, request):
@@ -154,17 +97,21 @@ class AuthViewSet(viewsets.ViewSet):
 
         if not email or not password or not full_name:
             return Response({
-                'error': 'Email, password, and full_name are required'
-            }, status=400)
+                'status': 'error',
+                'message': 'Email, password, and full_name are required'
+            }, status=status.HTTP_400_BAD_REQUEST)
 
-        # Only owners can self-register
         if role != 'owner':
             return Response({
-                'error': 'Only restaurant owners can self-register. Staff must be invited by the owner.'
-            }, status=400)
+                'status': 'error',
+                'message': 'Only restaurant owners can self-register. Staff must be invited by the owner.'
+            }, status=status.HTTP_403_FORBIDDEN)
 
         if User.objects.filter(email=email).exists():
-            return Response({'error': 'User with this email already exists'}, status=400)
+            return Response({
+                'status': 'error',
+                'message': 'User with this email already exists'
+            }, status=status.HTTP_400_BAD_REQUEST)
 
         user = User.objects.create_user(
             email=email,
@@ -173,41 +120,120 @@ class AuthViewSet(viewsets.ViewSet):
             role='owner'
         )
 
-        token = Token.objects.create(user=user)
+        refresh = RefreshToken.for_user(user)
+
         return Response({
-            'token': token.key,
-            'user': UserSerializer(user).data,
-            'message': 'Owner account created successfully. You can now create your restaurant.'
-        }, status=201)
+            'status': 'success',
+            'message': 'Owner account created successfully.',
+            'access': str(refresh.access_token),
+            'refresh': str(refresh),
+            'user': UserSerializer(user).data
+        }, status=status.HTTP_201_CREATED)
 
     @action(detail=False, methods=['post'])
-    def logout(self, request):
-        """Logout user"""
-        if request.user.is_authenticated:
-            request.user.auth_token.delete()
-            return Response({'message': 'Logged out successfully'})
-        return Response({'error': 'Not authenticated'}, status=400)
+    def login(self, request):
+        """JWT-based user login"""
+        email = request.data.get('email')
+        password = request.data.get('password')
 
-    @action(detail=False, methods=['get'])
+        if not email or not password:
+            return Response({
+                'status': 'error',
+                'message': 'Email and password are required'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        user = User.objects.filter(email=email).first()
+
+        if not user or not user.check_password(password):
+            return Response({
+                'status': 'error',
+                'message': 'Invalid credentials'
+            }, status=status.HTTP_401_UNAUTHORIZED)
+
+        refresh = RefreshToken.for_user(user)
+
+        # Gather assigned branches and restaurants
+        assigned_branches, accessible_restaurants = [], []
+        if user.role == 'owner':
+            restaurants = Restaurant.objects.filter(owner=user)
+            accessible_restaurants = list(restaurants.values('id', 'name'))
+            branches = Branch.objects.filter(restaurant__owner=user, is_active=True)
+            assigned_branches = list(branches.values('id', 'branch_name', 'restaurant__name', 'city'))
+        elif user.role in ['staff', 'manager']:
+            assigned_branches = list(
+                user.assigned_branches.filter(is_active=True).values(
+                    'id', 'branch_name', 'restaurant__name', 'city', 'restaurant_id'
+                )
+            )
+            restaurant_ids = user.assigned_branches.values_list('restaurant_id', flat=True).distinct()
+            accessible_restaurants = list(
+                Restaurant.objects.filter(id__in=restaurant_ids).values('id', 'name')
+            )
+
+        return Response({
+            'status': 'success',
+            'message': 'Login successful',
+            'access': str(refresh.access_token),
+            'refresh': str(refresh),
+            'user': UserSerializer(user).data,
+            'assigned_branches': assigned_branches,
+            'accessible_restaurants': accessible_restaurants,
+            'permissions': {
+                'can_create_restaurant': user.role == 'owner',
+                'can_create_branch': user.role == 'owner',
+                'can_invite_staff': user.role == 'owner',
+                'role': user.role
+            }
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['post'], permission_classes=[IsAuthenticated])
+    def logout(self, request):
+        """Blacklist refresh token"""
+        refresh_token = request.data.get("refresh")
+
+        if not refresh_token:
+            return Response({
+                "status": "error",
+                "message": "Refresh token is required to logout"
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            token = RefreshToken(refresh_token)
+            token.blacklist()
+            return Response({
+                "status": "success",
+                "message": "Logged out successfully"
+            }, status=status.HTTP_200_OK)
+        except TokenError as e:
+            return Response({
+                "status": "error",
+                "message": f"Token error: {str(e)}"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            return Response({
+                "status": "error",
+                "message": "Invalid or expired token"
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=False, methods=['get'], permission_classes=[IsAuthenticated])
     def me(self, request):
         """Get current user info"""
-        if request.user.is_authenticated:
-            assigned_branches = []
-            if request.user.role in ['staff', 'manager']:
-                assigned_branches = list(
-                    request.user.assigned_branches.values('id', 'name', 'restaurant__name')
-                )
-            
-            return Response({
-                'user': UserSerializer(request.user).data,
-                'assigned_branches': assigned_branches
-            })
-        return Response({'error': 'Not authenticated'}, status=401)
+        assigned_branches = []
+        if request.user.role in ['staff', 'manager']:
+            assigned_branches = list(
+                request.user.assigned_branches.values('id', 'branch_name', 'restaurant__name')
+            )
 
-
+        return Response({
+            'status': 'success',
+            'user': UserSerializer(request.user).data,
+            'assigned_branches': assigned_branches
+        }, status=status.HTTP_200_OK)
+    
 # ===============================
 # RESTAURANT MANAGEMENT (OWNER ONLY)
 # ===============================
+
 class RestaurantViewSet(viewsets.ModelViewSet, BranchAccessMixin):
     queryset = Restaurant.objects.all()
     serializer_class = RestaurantSerializer
@@ -224,20 +250,29 @@ class RestaurantViewSet(viewsets.ModelViewSet, BranchAccessMixin):
         return Restaurant.objects.none()
 
     def create(self, request, *args, **kwargs):
-        """Only owners can create restaurants"""
-        if request.user.role != 'owner':
+        """Allow only one restaurant per owner"""
+        user = request.user
+
+        if user.role != 'owner':
             return Response({
                 'error': 'Only restaurant owners can create restaurants'
             }, status=403)
-        
+
+        # Check if the owner already has a restaurant
+        if Restaurant.objects.filter(owner=user, is_active=True).exists():
+            return Response({
+                'error': 'You already have a restaurant. Each owner can create only one.'
+            }, status=400)
+
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        serializer.save(owner=request.user)
-        
+        serializer.save(owner=user)
+
         return Response({
             'message': 'Restaurant created successfully',
             'restaurant': serializer.data
         }, status=201)
+
 
     def update(self, request, *args, **kwargs):
         """Only owner can update their restaurant"""
@@ -401,86 +436,130 @@ class RestaurantViewSet(viewsets.ModelViewSet, BranchAccessMixin):
             'assigned_branches': list(valid_branches.values('id', 'name'))
         })
 
-
 # ===============================
 # BRANCH MANAGEMENT
 # ===============================
+
 class BranchViewSet(viewsets.ModelViewSet, BranchAccessMixin):
     queryset = Branch.objects.all()
     serializer_class = BranchSerializer
     permission_classes = [IsAuthenticated]
 
-    def get_queryset(self):
-        """Filter branches based on user role"""
-        return self.get_accessible_branches()
+# ----------------------------------------------------------------
+    # LIST: Retrieve all accessible branches
+    # ----------------------------------------------------------------
+    def list(self, request, *args, **kwargs):
+        """Return branches accessible to the user"""
+        user = request.user
+        if user.role == 'owner':
+            branches = Branch.objects.filter(restaurant__owner=user, is_active=True)
+        elif user.role in ['manager', 'staff']:
+            branches = self.get_accessible_branches().filter(is_active=True)
+        else:
+            branches = Branch.objects.none()
 
+        serializer = self.get_serializer(branches, many=True)
+        return Response(serializer.data, status=200)
+
+    # ----------------------------------------------------------------
+    # CREATE: Owners create new branches
+    # ----------------------------------------------------------------
     def create(self, request, *args, **kwargs):
-        """Only owners can create branches"""
-        if request.user.role != 'owner':
-            return Response({
-                'error': 'Only restaurant owners can create branches'
-            }, status=403)
-        
+        """Only restaurant owners can create branches"""
+        user = request.user
+        if user.role != 'owner':
+            return Response({'error': 'Only restaurant owners can create branches'}, status=403)
+
         restaurant_id = request.data.get('restaurant')
         if not restaurant_id:
-            return Response({'error': 'restaurant_id is required'}, status=400)
-        
-        restaurant = Restaurant.objects.filter(
-            id=restaurant_id,
-            owner=request.user
-        ).first()
-        
+            return Response({'error': 'restaurant field is required'}, status=400)
+
+        restaurant = Restaurant.objects.filter(id=restaurant_id, owner=user, is_active=True).first()
         if not restaurant:
-            return Response({
-                'error': 'Restaurant not found or you do not own it'
-            }, status=404)
-        
+            return Response({'error': 'Restaurant not found or you do not own it'}, status=404)
+
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        serializer.save()
-        
+        serializer.save(restaurant=restaurant)
+
         return Response({
             'message': 'Branch created successfully',
             'branch': serializer.data
         }, status=201)
 
-    def retrieve(self, request, *args, **kwargs):
-        """Get branch details if user has access"""
-        instance = self.get_object()
-        
-        if not self.check_branch_access(instance.id):
-            return Response({
-                'error': 'Access denied to this branch'
-            }, status=403)
-        
-        serializer = self.get_serializer(instance)
-        return Response(serializer.data)
+    # ----------------------------------------------------------------
+    # RETRIEVE: via body instead of URL
+    # ----------------------------------------------------------------
+    @action(detail=False, methods=['post'])
+    def get_branch(self, request):
+        """Retrieve single branch via ID in body"""
+        branch_id = request.data.get('id')
+        if not branch_id:
+            return Response({'error': 'Branch id is required'}, status=400)
 
-    def update(self, request, *args, **kwargs):
-        """Only owner can update branch"""
-        instance = self.get_object()
-        
-        if request.user.role != 'owner' or instance.restaurant.owner != request.user:
-            return Response({
-                'error': 'Only the restaurant owner can update branches'
-            }, status=403)
-        
-        return super().update(request, *args, **kwargs)
+        branch = Branch.objects.filter(id=branch_id, is_active=True).first()
+        if not branch:
+            return Response({'error': 'Branch not found'}, status=404)
 
-    def destroy(self, request, *args, **kwargs):
-        """Soft delete branch"""
-        instance = self.get_object()
-        
-        if request.user.role != 'owner' or instance.restaurant.owner != request.user:
-            return Response({'error': 'Access denied'}, status=403)
-        
-        instance.is_active = False
-        instance.save()
-        
+        # Access control
+        if not self.check_branch_access(branch.id):
+            return Response({'error': 'Access denied to this branch'}, status=403)
+
+        serializer = self.get_serializer(branch)
+        return Response(serializer.data, status=200)
+
+    # ----------------------------------------------------------------
+    # UPDATE: via body instead of URL
+    # ----------------------------------------------------------------
+    @action(detail=False, methods=['patch'])
+    def update_branch(self, request):
+        """Update a branch via ID in body (owner only)"""
+        user = request.user
+        branch_id = request.data.get('id')
+
+        if not branch_id:
+            return Response({'error': 'Branch id is required'}, status=400)
+
+        branch = Branch.objects.filter(id=branch_id, is_active=True).first()
+        if not branch:
+            return Response({'error': 'Branch not found'}, status=404)
+
+        if user.role != 'owner' or branch.restaurant.owner != user:
+            return Response({'error': 'Only the restaurant owner can update this branch'}, status=403)
+
+        serializer = self.get_serializer(branch, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+
         return Response({
-            'message': 'Branch deactivated successfully'
-        })
+            'message': 'Branch updated successfully',
+            'branch': serializer.data
+        }, status=200)
 
+    # ----------------------------------------------------------------
+    # DELETE: via body instead of URL
+    # ----------------------------------------------------------------
+    @action(detail=False, methods=['delete'])
+    def delete_branch(self, request):
+        """Soft delete branch via ID in body (owner only)"""
+        user = request.user
+        branch_id = request.data.get('id')
+
+        if not branch_id:
+            return Response({'error': 'Branch id is required'}, status=400)
+
+        branch = Branch.objects.filter(id=branch_id, is_active=True).first()
+        if not branch:
+            return Response({'error': 'Branch not found'}, status=404)
+
+        if user.role != 'owner' or branch.restaurant.owner != user:
+            return Response({'error': 'Access denied'}, status=403)
+
+        branch.is_active = False
+        branch.save(update_fields=['is_active'])
+
+        return Response({'message': 'Branch deactivated successfully'}, status=200)
+    
     @action(detail=True, methods=['get'])
     def weekly_summary(self, request, pk=None):
         """Get weekly sales summary for branch"""
@@ -527,10 +606,10 @@ class BranchViewSet(viewsets.ModelViewSet, BranchAccessMixin):
             'staff': UserSerializer(staff, many=True).data
         })
 
-
 # ===============================
 # CATEGORY MANAGEMENT
 # ===============================
+
 class CategoryViewSet(viewsets.ModelViewSet, BranchAccessMixin):
     queryset = Category.objects.all()
     serializer_class = CategorySerializer
@@ -539,20 +618,114 @@ class CategoryViewSet(viewsets.ModelViewSet, BranchAccessMixin):
     def get_queryset(self):
         """Filter categories by accessible restaurants"""
         restaurants = self.get_accessible_restaurants()
-        return Category.objects.filter(restaurant__in=restaurants)
+        return Category.objects.filter(restaurant__in=restaurants, is_active=True)
 
+    def list(self, request, *args, **kwargs):
+        """Fetch all categories"""
+        queryset = self.get_queryset()
+        serializer = self.get_serializer(queryset, many=True)
+        return Response({
+            "status": "success",
+            "message": "Categories fetched successfully",
+            "data": serializer.data
+        }, status=status.HTTP_200_OK)
 
     def create(self, request, *args, **kwargs):
-        """Create category - owner only"""
+        """Create a new category — only for owners"""
         if request.user.role != 'owner':
-            return Response({'error': 'Only owners can create categories'}, status=403)
-        
-        restaurant_id = request.data.get('restaurant')
-        if not Restaurant.objects.filter(id=restaurant_id, owner=request.user).exists():
-            return Response({'error': 'Invalid restaurant'}, status=400)
-        
-        return super().create(request, *args, **kwargs)
+            return Response({
+                "status": "error",
+                "message": "Only restaurant owners can create categories"
+            }, status=status.HTTP_403_FORBIDDEN)
 
+        serializer = self.get_serializer(data=request.data)
+        if not serializer.is_valid():
+            return Response({
+                "status": "error",
+                "message": "Validation failed",
+                "errors": serializer.errors
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        serializer.save()
+
+        return Response({
+            "status": "success",
+            "message": "Category created successfully",
+            "data": serializer.data
+        }, status=status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=['patch'])
+    def update_category(self, request):
+        """Update a category (id passed in body)"""
+        category_id = request.data.get("id")
+        if not category_id:
+            return Response({
+                "status": "error",
+                "message": "Category ID is required"
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            category = Category.objects.get(id=category_id, is_active=True)
+        except Category.DoesNotExist:
+            return Response({
+                "status": "error",
+                "message": "Category not found"
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        # Check ownership
+        if request.user.role != 'owner' or category.restaurant.owner != request.user:
+            return Response({
+                "status": "error",
+                "message": "You can only update your own restaurant's categories"
+            }, status=status.HTTP_403_FORBIDDEN)
+
+        serializer = self.get_serializer(category, data=request.data, partial=True)
+        if not serializer.is_valid():
+            return Response({
+                "status": "error",
+                "message": "Validation failed",
+                "errors": serializer.errors
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        serializer.save()
+
+        return Response({
+            "status": "success",
+            "message": "Category updated successfully",
+            "data": serializer.data
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['delete'])
+    def delete_category(self, request):
+        """Soft delete a category (id passed in body)"""
+        category_id = request.data.get("id")
+        if not category_id:
+            return Response({
+                "status": "error",
+                "message": "Category ID is required"
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            category = Category.objects.get(id=category_id, is_active=True)
+        except Category.DoesNotExist:
+            return Response({
+                "status": "error",
+                "message": "Category not found"
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        if request.user.role != 'owner' or category.restaurant.owner != request.user:
+            return Response({
+                "status": "error",
+                "message": "You can only delete your own restaurant's categories"
+            }, status=status.HTTP_403_FORBIDDEN)
+
+        category.is_active = False
+        category.save()
+
+        return Response({
+            "status": "success",
+            "message": "Category deleted successfully"
+        }, status=status.HTTP_200_OK)
 
 # ===============================
 # MENU ITEMS
@@ -646,8 +819,6 @@ class MenuItemViewSet(viewsets.ModelViewSet, BranchAccessMixin):
         return Response({
             'message': f'{deleted_count} menu items deleted successfully'
         }, status=200)
-
-
 # ===============================
 # CUSTOMER MANAGEMENT
 # ===============================
@@ -677,8 +848,6 @@ class CustomerViewSet(viewsets.ModelViewSet):
             'total_orders': orders.count(),
             'orders': POSSaleSerializer(orders, many=True).data
         })
-
-
 # ===============================
 # POS SYSTEM
 # ===============================
@@ -998,8 +1167,6 @@ class POSViewSet(viewsets.ViewSet, BranchAccessMixin):
             'sales': POSSaleSerializer(sales, many=True).data,
             'count': sales.count()
         })
-
-
 # ===============================
 # FINANCE DASHBOARD
 # ===============================
@@ -1249,8 +1416,6 @@ class FinanceDashboardViewSet(viewsets.ViewSet, BranchAccessMixin):
                 'error': str(e),
                 'traceback': traceback.format_exc()
             }, status=500)
-
-
 # ===============================
 # SALES ANALYTICS
 # ===============================
@@ -1338,8 +1503,6 @@ class SalesAnalyticsViewSet(viewsets.ViewSet, BranchAccessMixin):
                 'trend': 'up' if revenue_change > 0 else 'down' if revenue_change < 0 else 'stable'
             }
         })
-
-
 # ===============================
 # AI FORECASTING
 # ===============================
@@ -1399,8 +1562,6 @@ class AIForecastViewSet(viewsets.ViewSet, BranchAccessMixin):
             'forecasts': results,
             'total_branches': len(results)
         })
-
-
 # ===============================
 # INVENTORY MANAGEMENT
 # ===============================
@@ -1478,8 +1639,6 @@ class InventoryViewSet(viewsets.ModelViewSet, BranchAccessMixin):
             'new_quantity': float(item.quantity_in_stock),
             'adjustment': float(adjustment)
         })
-
-
 # ===============================
 # RECIPES
 # ===============================
@@ -1536,8 +1695,6 @@ class RecipeViewSet(viewsets.ModelViewSet, BranchAccessMixin):
             'unavailable_items': unavailable,
             'count': len(unavailable)
         })
-
-
 # ===============================
 # INVENTORY TRANSACTIONS
 # ===============================
@@ -1594,8 +1751,6 @@ class InventoryTransactionViewSet(viewsets.ReadOnlyModelViewSet, BranchAccessMix
             'items': list(impact),
             'count': len(impact)
         })
-
-
 # ===============================
 # SUPPLIERS
 # ===============================
@@ -1619,8 +1774,6 @@ class SupplierViewSet(viewsets.ModelViewSet, BranchAccessMixin):
             return Response({'error': 'Invalid restaurant'}, status=400)
         
         return super().create(request, *args, **kwargs)
-
-
 # ===============================
 # INVENTORY ORDERS
 # ===============================
@@ -1660,8 +1813,6 @@ class InventoryOrderViewSet(viewsets.ModelViewSet, BranchAccessMixin):
             'order_id': order.id,
             'supplier': order.supplier.name
         })
-
-
 # ===============================
 # AI CHAT INTERFACE
 # ===============================
@@ -1739,8 +1890,6 @@ class AskAIView(APIView, BranchAccessMixin):
                 {"error": str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
-
-
 # ===============================
 # RUN ML MODELS (FOR N8N)
 # ===============================
@@ -1810,8 +1959,6 @@ class RunModelView(APIView, BranchAccessMixin):
                 {"error": str(e), "traceback": traceback.format_exc()},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
-
-
 # ===============================
 # CHAT HISTORY (OPTIONAL)
 # ===============================
@@ -1832,8 +1979,6 @@ class ChatHistoryView(APIView):
             "status": "saved",
             "message": "Chat message saved"
         })
-
-
 # ===============================
 # BRANCH COMPARISON (AI)
 # ===============================
@@ -1883,8 +2028,6 @@ class AIComparisonViewSet(viewsets.ViewSet, BranchAccessMixin):
             'comparisons': serializer.data,
             'count': comparisons.count()
         })
-
-
 # ===============================
 # SYNC MANAGEMENT
 # ===============================
@@ -1944,8 +2087,6 @@ class SyncManagementViewSet(viewsets.ViewSet):
             'period_days': days,
             'branch_id': branch_id
         })
-
-
 # ===============================
 # REPORTS
 # ===============================
@@ -2078,8 +2219,6 @@ class ReportsViewSet(viewsets.ViewSet, BranchAccessMixin):
             },
             'daily_breakdown': daily_sales
         })
-
-
 # ===============================
 # USER MANAGEMENT
 # ===============================
@@ -2154,8 +2293,6 @@ class UserManagementViewSet(viewsets.ViewSet):
         return Response({
             'message': 'Password changed successfully'
         })
-
-
 # ===============================
 # DASHBOARD STATS
 # ===============================

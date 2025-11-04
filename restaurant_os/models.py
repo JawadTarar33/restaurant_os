@@ -55,15 +55,13 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     def __str__(self):
         return f"{self.full_name} ({self.role})"
-
-
 # =========================
 # RESTAURANT STRUCTURE
 # =========================
 class Restaurant(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid4, editable=False)
     name = models.CharField(max_length=255)
-    owner = models.ForeignKey(User, on_delete=models.CASCADE, related_name="restaurants")
+    owner = models.OneToOneField(User, on_delete=models.CASCADE, related_name="restaurants")
     is_active = models.BooleanField(default=True)
     tax_rate = models.DecimalField(max_digits=5, decimal_places=2, default=0)
     currency = models.CharField(max_length=10, default="PKR")
@@ -74,22 +72,43 @@ class Restaurant(models.Model):
 
 class Branch(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid4, editable=False)
-    restaurant = models.ForeignKey(Restaurant, on_delete=models.CASCADE, related_name="branches")
+    restaurant = models.ForeignKey('Restaurant', on_delete=models.CASCADE, related_name='branches')
+    
+    # Core branch info
     branch_name = models.CharField(max_length=100)
     city = models.CharField(max_length=100)
     address = models.TextField(blank=True, null=True)
     phone = models.CharField(max_length=20, blank=True, null=True)
+    email = models.EmailField(blank=True, null=True)
+    
+    # New fields
+    number_of_employees = models.PositiveIntegerField(default=0)
+    opening_hours = models.CharField(max_length=100, blank=True, null=True)  # e.g. "9 AM - 11 PM"
+    manager = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='managed_branches',
+        limit_choices_to={'role__in': ['manager', 'staff']},
+        help_text="Assign a manager to this branch"
+    )
+
+    # Status + metadata
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
-        return f"{self.name} - {self.city}"
+        return f"{self.branch_name} - {self.city}"
 
 
 class Category(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid4, editable=False)
     restaurant = models.ForeignKey(Restaurant, on_delete=models.CASCADE, related_name="categories")
     name = models.CharField(max_length=100)
+    description = models.TextField(blank=True, null=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
         return f"{self.name} ({self.restaurant.name})"
@@ -231,9 +250,6 @@ class Supplier(models.Model):
 
     def __str__(self):
         return f"{self.name} ({self.restaurant.name})"
-
-
-
 
 
 class InventoryItem(models.Model):

@@ -29,10 +29,27 @@ class RestaurantSerializer(serializers.ModelSerializer):
 
 class BranchSerializer(serializers.ModelSerializer):
     restaurant_name = serializers.CharField(source='restaurant.name', read_only=True)
+    manager_name = serializers.CharField(source='manager.full_name', read_only=True)
 
     class Meta:
         model = Branch
-        fields = '__all__'
+        fields = [
+            'id',
+            'restaurant',
+            'restaurant_name',
+            'branch_name',
+            'city',
+            'address',
+            'phone',
+            'email',
+            'number_of_employees',
+            'opening_hours',
+            'manager',
+            'manager_name',
+            'is_active',
+            'created_at'
+        ]
+        read_only_fields = ['is_active', 'created_at']
 
 
 class CategorySerializer(serializers.ModelSerializer):

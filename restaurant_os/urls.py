@@ -1,8 +1,14 @@
-
-from rest_framework.routers import DefaultRouter
 from django.urls import path, include
+from rest_framework.routers import DefaultRouter
+from rest_framework_simplejwt.views import (
+    TokenObtainPairView,
+    TokenRefreshView,
+)
 from .views import *
 
+# =============================
+# ROUTER REGISTRATION
+# =============================
 router = DefaultRouter()
 
 # Authentication
@@ -26,7 +32,7 @@ router.register(r'sales-analytics', SalesAnalyticsViewSet, basename='sales-analy
 router.register(r'ai-forecast', AIForecastViewSet, basename='ai-forecast')
 router.register(r'ai-comparison', AIComparisonViewSet, basename='ai-comparison')
 
-# Inventory
+# Inventory Management
 router.register(r'inventory', InventoryViewSet, basename='inventory')
 router.register(r'suppliers', SupplierViewSet, basename='suppliers')
 router.register(r'inventory-orders', InventoryOrderViewSet, basename='inventory-orders')
@@ -34,17 +40,26 @@ router.register(r'recipes', RecipeViewSet, basename='recipes')
 router.register(r'inventory-transactions', InventoryTransactionViewSet, basename='inventory-transactions')
 
 # =============================
-# AI Chat Integration (NEW)
+# ADDITIONAL NON-ROUTER ENDPOINTS
 # =============================
 additional_patterns = [
-    # Main AI chat endpoint - called by frontend
+    # AI Chat Integration
     path('ask-ai/', AskAIView.as_view(), name='ask-ai'),
-    
-    # ML model execution - called by n8n workflows
     path('run-model/', RunModelView.as_view(), name='run-model'),
-    
-    # Optional: Chat history
     path('chat-history/', ChatHistoryView.as_view(), name='chat-history'),
+
+    # JWT Authentication Endpoints (SimpleJWT)
+    path('auth/token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
+    path('auth/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+
+    # Custom Auth Actions (from AuthViewSet)
+    path('auth/login/', AuthViewSet.as_view({'post': 'login'}), name='jwt_login'),
+    path('auth/register/', AuthViewSet.as_view({'post': 'register'}), name='jwt_register'),
+    path('auth/logout/', AuthViewSet.as_view({'post': 'logout'}), name='jwt_logout'),
+    path('auth/me/', AuthViewSet.as_view({'get': 'me'}), name='jwt_me'),
 ]
 
+# =============================
+# FINAL URLPATTERNS
+# =============================
 urlpatterns = router.urls + additional_patterns

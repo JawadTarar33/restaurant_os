@@ -64,15 +64,39 @@ class MenuItemSerializer(serializers.ModelSerializer):
     category_name = serializers.CharField(source='category.name', read_only=True)
     restaurant_name = serializers.CharField(source='restaurant.name', read_only=True)
     price_with_tax = serializers.SerializerMethodField()
+    profit_margin = serializers.SerializerMethodField()
 
     class Meta:
         model = MenuItem
-        fields = '__all__'
+        fields = [
+            'id', 'restaurant', 'restaurant_name', 'category', 'category_name',
+            'name', 'description', 'cost_price', 'sale_price', 'price_with_tax',
+            'profit_margin', 'status', 'image_url', 'preparation_time',
+            'updated_at'
+        ]
+        read_only_fields = ['id', 'updated_at', 'restaurant_name', 'category_name', 'profit_margin']
 
     def get_price_with_tax(self, obj):
-        tax_rate = obj.restaurant.tax_rate / 100 if obj.restaurant else Decimal('0')
-        return float(obj.price + (obj.price * tax_rate))
+        """Compute final price with restaurant's tax rate."""
+        tax_rate = Decimal('0')
+        if hasattr(obj.restaurant, 'tax_rate') and obj.restaurant.tax_rate:
+            tax_rate = Decimal(obj.restaurant.tax_rate) / 100
 
+        return float(obj.sale_price + (obj.sale_price * tax_rate))
+
+    def get_profit_margin(self, obj):
+        """Compute profit for reporting."""
+        if obj.cost_price is not None and obj.sale_price is not None:
+            return float(obj.sale_price - obj.cost_price)
+        return None
+
+    def validate(self, data):
+        """Ensure logical and valid price relationships."""
+        cost = data.get('cost_price')
+        sale = data.get('sale_price')
+        if cost is not None and sale is not None and sale < cost:
+            raise serializers.ValidationError("Sale price cannot be lower than cost price.")
+        return data
 
 # =========================
 # CUSTOMER & POS

@@ -101,6 +101,15 @@ class Branch(models.Model):
     def __str__(self):
         return f"{self.branch_name} - {self.city}"
 
+    # Compatibility property: allow using `name` where older code expects `branch.name`
+    @property
+    def name(self):
+        return self.branch_name
+
+    @name.setter
+    def name(self, value):
+        self.branch_name = value
+
 
 class Category(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid4, editable=False)
@@ -151,6 +160,27 @@ class MenuItem(models.Model):
         """Optional: Compute profit per item."""
         return self.sale_price - self.cost_price
 
+    # Compatibility properties for older code that expects different field names
+    @property
+    def price(self):
+        return self.sale_price
+
+    @price.setter
+    def price(self, value):
+        self.sale_price = value
+
+    @property
+    def available(self):
+        return self.status == 'available'
+
+    @available.setter
+    def available(self, value):
+        self.status = 'available' if value else 'unavailable'
+
+    @property
+    def image(self):
+        return self.image_url
+
 
 # =========================
 # CUSTOMERS & POS SALES
@@ -186,6 +216,34 @@ class POSSale(models.Model):
 
     def __str__(self):
         return f"POS Sale #{self.id} ({self.branch.name})"
+
+    def process_inventory_deductions(self):
+        """
+        Deduct inventory quantities for this sale's items using associated recipes.
+        Returns: (True, details) on success or raises an Exception on failure.
+        """
+        from decimal import Decimal
+        details = []
+
+        # Ensure we operate inside a transaction at caller side
+        for sale_item in self.items.select_related('menu_item').all():
+            menu_item = sale_item.menu_item
+            quantity_sold = sale_item.quantity
+
+            # If menu item has a recipe, deduct ingredients
+            if hasattr(menu_item, 'recipe') and menu_item.recipe is not None and menu_item.recipe.is_active:
+                for ing in menu_item.recipe.ingredients.select_related('inventory_item').all():
+                    inv_item = ing.inventory_item
+                    # required quantity = ingredient quantity * quantity_sold
+                    required = (ing.quantity * Decimal(quantity_sold))
+                    if inv_item.quantity_in_stock < required:
+                        raise ValueError(f"Insufficient stock for {inv_item.name}: required {required}, available {inv_item.quantity_in_stock}")
+
+                    # Deduct using InventoryItem helper which already logs InventoryTransaction
+                    inv_item.deduct_quantity(required, transaction_type='sale', user=self.cashier, pos_sale=self)
+                    details.append({'inventory_item': inv_item.name, 'deducted': float(required)})
+
+        return True, details
 
 
 class POSSaleItem(models.Model):
@@ -334,6 +392,15 @@ class InventoryTransaction(models.Model):
 
     def __str__(self):
         return f"{self.inventory_item.name} ({self.transaction_type})"
+
+    # Backwards-compatible alias: some code may call this field `created_by`
+    @property
+    def created_by(self):
+        return self.performed_by
+
+    @created_by.setter
+    def created_by(self, value):
+        self.performed_by = value
 
 
 # =========================

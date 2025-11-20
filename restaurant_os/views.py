@@ -1669,7 +1669,7 @@ class InventoryViewSet(viewsets.ModelViewSet, BranchAccessMixin):
             transaction_type=transaction_type,
             quantity=abs(adjustment),
             notes=notes,
-            created_by=request.user
+            performed_by=request.user
         )
 
         return Response({

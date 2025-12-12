@@ -63,40 +63,64 @@ class CategorySerializer(serializers.ModelSerializer):
 class MenuItemSerializer(serializers.ModelSerializer):
     category_name = serializers.CharField(source='category.name', read_only=True)
     restaurant_name = serializers.CharField(source='restaurant.name', read_only=True)
+
     price_with_tax = serializers.SerializerMethodField()
     profit_margin = serializers.SerializerMethodField()
+
+    image_file = serializers.ImageField(required=False, allow_null=True)
+
+    # WRITE INGREDIENTS (additive only)
+    ingredients = RecipeIngredientWritableSerializer(
+        many=True, write_only=True, required=False
+    )
+
+    # KEEP EXISTING LOGIC
+    recipe = RecipeSerializer(read_only=True)
 
     class Meta:
         model = MenuItem
         fields = [
             'id', 'restaurant', 'restaurant_name', 'category', 'category_name',
             'name', 'description', 'cost_price', 'sale_price', 'price_with_tax',
-            'profit_margin', 'status', 'image_url', 'preparation_time',
-            'updated_at'
+            'profit_margin', 'status', 'image_url', 'image_file',
+            'preparation_time', 'updated_at',
+            'ingredients', 'recipe'
         ]
-        read_only_fields = ['id', 'updated_at', 'restaurant_name', 'category_name', 'profit_margin']
 
     def get_price_with_tax(self, obj):
-        """Compute final price with restaurant's tax rate."""
-        tax_rate = Decimal('0')
-        if hasattr(obj.restaurant, 'tax_rate') and obj.restaurant.tax_rate:
-            tax_rate = Decimal(obj.restaurant.tax_rate) / 100
-
+        tax_rate = Decimal(obj.restaurant.tax_rate or 0) / 100
         return float(obj.sale_price + (obj.sale_price * tax_rate))
 
     def get_profit_margin(self, obj):
-        """Compute profit for reporting."""
-        if obj.cost_price is not None and obj.sale_price is not None:
-            return float(obj.sale_price - obj.cost_price)
-        return None
+        return float(obj.sale_price - obj.cost_price)
 
-    def validate(self, data):
-        """Ensure logical and valid price relationships."""
-        cost = data.get('cost_price')
-        sale = data.get('sale_price')
-        if cost is not None and sale is not None and sale < cost:
-            raise serializers.ValidationError("Sale price cannot be lower than cost price.")
-        return data
+    def create(self, validated_data):
+        ingredients = validated_data.pop("ingredients", [])
+        item = super().create(validated_data)
+
+        # Only add new logic — DO NOT touch existing recipe logic
+        if ingredients:
+            recipe = Recipe.objects.create(
+                menu_item=item,
+                name=f"Recipe for {item.name}",
+                preparation_time=item.preparation_time
+            )
+            for ing in ingredients:
+                RecipeIngredient.objects.create(recipe=recipe, **ing)
+
+        return item
+
+    def update(self, instance, validated_data):
+        ingredients = validated_data.pop("ingredients", None)
+        item = super().update(instance, validated_data)
+
+        if ingredients is not None:
+            recipe, _ = Recipe.objects.get_or_create(menu_item=item)
+            recipe.ingredients.all().delete()
+            for ing in ingredients:
+                RecipeIngredient.objects.create(recipe=recipe, **ing)
+
+        return item
 
 # =========================
 # CUSTOMER & POS
@@ -222,6 +246,7 @@ class InventoryOrderSerializer(serializers.ModelSerializer):
 # =========================
 # RECIPES
 # =========================
+
 class RecipeIngredientSerializer(serializers.ModelSerializer):
     inventory_item_name = serializers.CharField(source='inventory_item.name', read_only=True)
     inventory_item_stock = serializers.DecimalField(

@@ -122,6 +122,7 @@ class Category(models.Model):
     def __str__(self):
         return f"{self.name} ({self.restaurant.name})"
 
+
 class MenuItem(models.Model):
     STATUS_CHOICES = [
         ('available', 'Available'),
@@ -137,18 +138,18 @@ class MenuItem(models.Model):
     name = models.CharField(max_length=100)
     description = models.TextField(blank=True, null=True)
 
-    # ✅ Add both cost and sale prices
-    cost_price = models.DecimalField(max_digits=10, decimal_places=2, help_text="Internal cost of the item")
-    sale_price = models.DecimalField(max_digits=10, decimal_places=2, help_text="Price shown to customers")
+    cost_price = models.DecimalField(max_digits=10, decimal_places=2)
+    sale_price = models.DecimalField(max_digits=10, decimal_places=2)
 
-    # ✅ Replace 'available' boolean with more flexible 'status'
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='available')
 
-    # ✅ Image URL
+    # Existing field
     image_url = models.URLField(blank=True, null=True)
 
-    # ✅ Preparation time (in minutes)
-    preparation_time = models.PositiveIntegerField(default=5, help_text="Time in minutes")
+    # NEW FIELD (does NOT break existing logic)
+    image_file = models.ImageField(upload_to="menu/", blank=True, null=True)
+
+    preparation_time = models.PositiveIntegerField(default=5)
 
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -157,10 +158,8 @@ class MenuItem(models.Model):
 
     @property
     def profit_margin(self):
-        """Optional: Compute profit per item."""
         return self.sale_price - self.cost_price
 
-    # Compatibility properties for older code that expects different field names
     @property
     def price(self):
         return self.sale_price
@@ -179,6 +178,12 @@ class MenuItem(models.Model):
 
     @property
     def image(self):
+        # Respect existing logic; add fallback to uploaded file
+        if self.image_file:
+            try:
+                return self.image_file.url
+            except:
+                return None
         return self.image_url
 
 

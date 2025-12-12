@@ -38,6 +38,7 @@ router.register(r'suppliers', SupplierViewSet, basename='suppliers')
 router.register(r'inventory-orders', InventoryOrderViewSet, basename='inventory-orders')
 router.register(r'recipes', RecipeViewSet, basename='recipes')
 router.register(r'inventory-transactions', InventoryTransactionViewSet, basename='inventory-transactions')
+router.register(r'ingredients', IngredientViewSet, basename='ingredients')
 
 # =============================
 # ADDITIONAL NON-ROUTER ENDPOINTS

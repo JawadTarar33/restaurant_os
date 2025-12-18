@@ -176,7 +176,7 @@ class MenuItem(models.Model):
     image_url = models.URLField(blank=True, null=True)
 
     # NEW FIELD (does NOT break existing logic)
-    image_file = models.ImageField(upload_to="menu/", blank=True, null=True)
+    image_file = models.ImageField(upload_to="menu_items/", blank=True, null=True)
 
     preparation_time = models.PositiveIntegerField(default=5)
 

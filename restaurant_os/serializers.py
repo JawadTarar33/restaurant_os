@@ -5,7 +5,7 @@
 from rest_framework import serializers
 from decimal import Decimal
 from .models import *
-
+from django.db import transaction
 
 # =========================
 # USER & AUTH
@@ -58,6 +58,67 @@ class CategorySerializer(serializers.ModelSerializer):
     class Meta:
         model = Category
         fields = '__all__'
+
+
+# =========================
+# RECIPES
+# =========================
+
+class RecipeIngredientSerializer(serializers.ModelSerializer):
+    inventory_item_name = serializers.CharField(source='inventory_item.name', read_only=True)
+    inventory_item_stock = serializers.DecimalField(
+        source='inventory_item.quantity_in_stock',
+        max_digits=10,
+        decimal_places=3,
+        read_only=True
+    )
+    total_cost = serializers.SerializerMethodField()
+
+    class Meta:
+        model = RecipeIngredient
+        fields = '__all__'
+
+    def get_total_cost(self, obj):
+        if obj.inventory_item.unit_price:
+            return float(obj.quantity * obj.inventory_item.unit_price)
+        return 0
+
+
+class RecipeSerializer(serializers.ModelSerializer):
+    ingredients = RecipeIngredientSerializer(many=True, read_only=True)
+    menu_item_name = serializers.CharField(source='menu_item.name', read_only=True)
+    total_cost = serializers.SerializerMethodField()
+    availability_status = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Recipe
+        fields = '__all__'
+
+    def get_total_cost(self, obj):
+        return float(obj.get_total_cost())
+
+    def get_availability_status(self, obj):
+        is_available, missing = obj.check_availability()
+        return {
+            'available': is_available,
+            'missing_items': missing
+        }
+
+
+class RecipeIngredientWritableSerializer(serializers.ModelSerializer):
+    """
+    Minimal writable serializer for creating/updating ingredients.
+    Does NOT replace RecipeIngredientSerializer.
+    """
+    class Meta:
+        model = RecipeIngredient
+        fields = [
+            'inventory_item',
+            'quantity',
+            'unit',
+            'is_optional',
+            'notes'
+        ]
 
 
 class MenuItemSerializer(serializers.ModelSerializer):
@@ -157,7 +218,6 @@ class CreatePOSSaleSerializer(serializers.Serializer):
     discount_amount = serializers.DecimalField(max_digits=12, decimal_places=2, default=0)
     items = serializers.ListField(child=serializers.DictField())
 
-
 # =========================
 # SALES ANALYTICS & DASHBOARD
 # =========================
@@ -189,7 +249,6 @@ class BranchComparisonSerializer(serializers.ModelSerializer):
         model = BranchComparison
         fields = '__all__'
 
-
 # =========================
 # SUPPLIERS & INVENTORY
 # =========================
@@ -204,6 +263,7 @@ class SupplierSerializer(serializers.ModelSerializer):
 class InventoryItemSerializer(serializers.ModelSerializer):
     supplier_name = serializers.CharField(source='supplier.name', read_only=True)
     restaurant_name = serializers.CharField(source='restaurant.name', read_only=True)
+    branch_name = serializers.CharField(source='branch.branch_name', read_only=True)
     needs_reorder = serializers.SerializerMethodField()
 
     class Meta:
@@ -221,7 +281,6 @@ class InventoryTransactionSerializer(serializers.ModelSerializer):
     class Meta:
         model = InventoryTransaction
         fields = '__all__'
-
 
 
 class InventoryOrderItemSerializer(serializers.ModelSerializer):
@@ -243,46 +302,117 @@ class InventoryOrderSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
-# =========================
-# RECIPES
-# =========================
-
-class RecipeIngredientSerializer(serializers.ModelSerializer):
-    inventory_item_name = serializers.CharField(source='inventory_item.name', read_only=True)
-    inventory_item_stock = serializers.DecimalField(
-        source='inventory_item.quantity_in_stock',
-        max_digits=10,
-        decimal_places=3,
-        read_only=True
+class StaffInviteSerializer(serializers.ModelSerializer):
+    restaurant_name = serializers.CharField(
+        source="restaurant.name", read_only=True
     )
-    total_cost = serializers.SerializerMethodField()
+    branches = serializers.SerializerMethodField()
 
     class Meta:
-        model = RecipeIngredient
-        fields = '__all__'
+        model = StaffInvite
+        fields = [
+            "id",
+            "email",
+            "role",
+            "restaurant",
+            "restaurant_name",
+            "branches",
+            "is_used",
+            "expires_at",
+            "created_at",
+        ]
 
-    def get_total_cost(self, obj):
-        if obj.inventory_item.unit_price:
-            return float(obj.quantity * obj.inventory_item.unit_price)
-        return 0
+    def get_branches(self, obj):
+        return list(
+            obj.branches.values(
+                "id",
+                "branch_name",
+                "city"
+            )
+        )
 
 
-class RecipeSerializer(serializers.ModelSerializer):
-    ingredients = RecipeIngredientSerializer(many=True, read_only=True)
-    menu_item_name = serializers.CharField(source='menu_item.name', read_only=True)
-    total_cost = serializers.SerializerMethodField()
-    availability_status = serializers.SerializerMethodField()
+class CreateStaffInviteSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    role = serializers.ChoiceField(choices=["staff", "manager"])
+    branch_ids = serializers.ListField(
+        child=serializers.UUIDField(),
+        allow_empty=False
+    )
 
-    class Meta:
-        model = Recipe
-        fields = '__all__'
+    def validate_branch_ids(self, value):
+        request = self.context["request"]
+        restaurant = self.context["restaurant"]
 
-    def get_total_cost(self, obj):
-        return float(obj.get_total_cost())
+        branches = Branch.objects.filter(
+            id__in=value,
+            restaurant=restaurant,
+            is_active=True
+        )
 
-    def get_availability_status(self, obj):
-        is_available, missing = obj.check_availability()
-        return {
-            'available': is_available,
-            'missing_items': missing
-        }
+        if branches.count() != len(value):
+            raise serializers.ValidationError(
+                "One or more branches are invalid or do not belong to this restaurant."
+            )
+
+        return value
+
+    def validate(self, attrs):
+        email = attrs["email"]
+
+        if User.objects.filter(email=email).exists():
+            raise serializers.ValidationError(
+                {"email": "User with this email already exists."}
+            )
+
+        if StaffInvite.objects.filter(
+            email=email,
+            restaurant=self.context["restaurant"],
+            is_used=False,
+            expires_at__gt=timezone.now()
+        ).exists():
+
+            raise serializers.ValidationError(
+                {"email": "An active invite already exists for this email."}
+            )
+
+        return attrs
+
+
+class AcceptStaffInviteSerializer(serializers.Serializer):
+    token = serializers.CharField()
+    full_name = serializers.CharField(max_length=150)
+    password = serializers.CharField(write_only=True, min_length=6)
+
+    def validate_token(self, value):
+        invite = StaffInvite.objects.filter(token=value).first()
+
+        if not invite:
+            raise serializers.ValidationError("Invalid invite token.")
+
+        if invite.is_used:
+            raise serializers.ValidationError("Invite already used.")
+
+        if invite.expires_at < timezone.now():
+            raise serializers.ValidationError("Invite has expired.")
+
+        self.invite = invite
+        return value
+
+    def create(self, validated_data):
+        invite = self.invite
+
+        with transaction.atomic():
+            user = User.objects.create_user(
+                email=invite.email,
+                password=validated_data["password"],
+                full_name=validated_data["full_name"],
+                role=invite.role
+            )
+
+            user.assigned_branches.set(invite.branches.all())
+
+            invite.is_used = True
+            invite.save(update_fields=["is_used"])
+
+        return user

@@ -9,6 +9,7 @@ from decimal import Decimal
 from django.conf import settings
 import uuid 
 from uuid import uuid4
+from django.core.exceptions import ValidationError
 
 # =========================
 # USER MODEL
@@ -55,6 +56,7 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     def __str__(self):
         return f"{self.full_name} ({self.role})"
+    
 # =========================
 # RESTAURANT STRUCTURE
 # =========================
@@ -109,6 +111,33 @@ class Branch(models.Model):
     @name.setter
     def name(self, value):
         self.branch_name = value
+
+
+class StaffInvite(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid4, editable=False)
+
+    restaurant = models.ForeignKey(
+        Restaurant, on_delete=models.CASCADE, related_name="staff_invites"
+    )
+
+    branches = models.ManyToManyField(
+        Branch, related_name="staff_invites"
+    )
+
+    email = models.EmailField()
+    role = models.CharField(
+        max_length=20,
+        choices=[("staff", "Staff"), ("manager", "Manager")]
+    )
+
+    token = models.CharField(max_length=64, unique=True, db_index=True)
+    is_used = models.BooleanField(default=False)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+
+    def is_valid(self):
+        return not self.is_used and timezone.now() < self.expires_at
 
 
 class Category(models.Model):
@@ -320,7 +349,6 @@ class BranchComparison(models.Model):
         return f"Comparison: {self.branch_1.name} vs {self.branch_2.name} ({self.comparison_date})"
 
 
-
 # =========================
 # SUPPLIERS & INVENTORY
 # =========================
@@ -338,8 +366,21 @@ class Supplier(models.Model):
 
 
 class InventoryItem(models.Model):
+    class Meta:
+        unique_together = ("branch", "name")
+
     id = models.UUIDField(primary_key=True, default=uuid4, editable=False)
-    restaurant = models.ForeignKey(Restaurant, on_delete=models.CASCADE, related_name="inventory")
+    restaurant = models.ForeignKey(
+        Restaurant,
+        on_delete=models.CASCADE,
+        related_name="inventory"
+    )
+
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.CASCADE,
+        related_name="inventory_items"
+    )
     supplier = models.ForeignKey(Supplier, on_delete=models.SET_NULL, null=True, blank=True, related_name="items")
     name = models.CharField(max_length=100)
     quantity_in_stock = models.DecimalField(max_digits=10, decimal_places=2, default=0)
@@ -460,7 +501,17 @@ class InventoryOrderItem(models.Model):
 # =========================
 class Recipe(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid4, editable=False)
-    menu_item = models.OneToOneField(MenuItem, on_delete=models.CASCADE, related_name="recipe")
+    menu_item = models.OneToOneField(
+        MenuItem,
+        on_delete=models.CASCADE,
+        related_name="recipe"
+    )
+
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.CASCADE,
+        related_name="recipes"
+    )
     name = models.CharField(max_length=200)
     description = models.TextField(blank=True, null=True)
     preparation_time = models.IntegerField(default=0)
@@ -506,6 +557,19 @@ class RecipeIngredient(models.Model):
 
     class Meta:
         unique_together = ("recipe", "inventory_item")
+
+    def clean(self):
+        """
+        Ensure inventory item belongs to SAME BRANCH as recipe
+        """
+        if self.inventory_item.branch_id != self.recipe.branch_id:
+            raise ValidationError(
+                "Inventory item must belong to the same branch as the recipe."
+            )
+
+    def save(self, *args, **kwargs):
+        self.full_clean()  # enforce clean()
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.recipe.menu_item.name} uses {self.inventory_item.name}"

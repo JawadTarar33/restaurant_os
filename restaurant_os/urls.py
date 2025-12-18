@@ -58,6 +58,7 @@ additional_patterns = [
     path('auth/register/', AuthViewSet.as_view({'post': 'register'}), name='jwt_register'),
     path('auth/logout/', AuthViewSet.as_view({'post': 'logout'}), name='jwt_logout'),
     path('auth/me/', AuthViewSet.as_view({'get': 'me'}), name='jwt_me'),
+    path("auth/accept-invite/", AcceptStaffInviteView.as_view(),name="accept-staff-invite"),
 ]
 
 # =============================

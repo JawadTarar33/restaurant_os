@@ -5,7 +5,8 @@ from rest_framework_simplejwt.views import (
     TokenRefreshView,
 )
 from .views import *
-
+from django.conf import settings
+from django.conf.urls.static import static
 # =============================
 # ROUTER REGISTRATION
 # =============================
@@ -59,9 +60,10 @@ additional_patterns = [
     path('auth/logout/', AuthViewSet.as_view({'post': 'logout'}), name='jwt_logout'),
     path('auth/me/', AuthViewSet.as_view({'get': 'me'}), name='jwt_me'),
     path("auth/accept-invite/", AcceptStaffInviteView.as_view(),name="accept-staff-invite"),
+
 ]
 
 # =============================
 # FINAL URLPATTERNS
 # =============================
-urlpatterns = router.urls + additional_patterns
+urlpatterns = router.urls + additional_patterns+ static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

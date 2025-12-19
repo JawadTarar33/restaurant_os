@@ -181,7 +181,6 @@ class AuthViewSet(viewsets.ViewSet):
             'permissions': {
                 'can_create_restaurant': user.role == 'owner',
                 'can_create_branch': user.role == 'owner',
-                'can_invite_staff': user.role == 'owner',
                 'role': user.role
             }
         }, status=status.HTTP_200_OK)
@@ -298,112 +297,6 @@ class RestaurantViewSet(viewsets.ModelViewSet, BranchAccessMixin):
             'message': 'Restaurant deactivated successfully'
         })
 
-    @action(detail=True, methods=["post"])
-    def invite_staff(self, request, pk=None):
-        """
-        Owner invites staff to specific branches
-        """
-        restaurant = self.get_object()
-
-        if request.user.role != "owner" or restaurant.owner != request.user:
-            return Response(
-                {"error": "Only the restaurant owner can invite staff"},
-                status=status.HTTP_403_FORBIDDEN
-            )
-
-        serializer = CreateStaffInviteSerializer(
-            data=request.data,
-            context={
-                "request": request,
-                "restaurant": restaurant
-            }
-        )
-        serializer.is_valid(raise_exception=True)
-
-        token = uuid.uuid4().hex
-
-        invite = StaffInvite.objects.create(
-            restaurant=restaurant,
-            email=serializer.validated_data["email"],
-            role=serializer.validated_data["role"],
-            token=token,
-            expires_at=timezone.now() + timedelta(days=7)
-        )
-
-        invite.branches.set(serializer.validated_data["branch_ids"])
-
-        invite_link = request.build_absolute_uri(
-            f"/api/auth/accept-invite/?token={token}"
-        )
-
-        return Response(
-            {
-                "message": "Branch-specific staff invite created",
-                "invite": StaffInviteSerializer(invite).data,
-                "invite_link": invite_link
-            },
-            status=status.HTTP_201_CREATED
-        )
-    
-    @action(detail=True, methods=["get"])
-    def staff_invites(self, request, pk=None):
-        """
-        Owner views all staff invites for their restaurant
-        """
-        restaurant = self.get_object()
-
-        if request.user.role != "owner" or restaurant.owner != request.user:
-            return Response(
-                {"error": "Access denied"},
-                status=status.HTTP_403_FORBIDDEN
-            )
-
-        invites = StaffInvite.objects.filter(
-            restaurant=restaurant
-        ).order_by("-created_at")
-
-        return Response(
-            {
-                "restaurant": restaurant.name,
-                "invites": StaffInviteSerializer(invites, many=True).data
-            },
-            status=status.HTTP_200_OK
-        )
-    
-
-    @action(detail=True, methods=["delete"])
-    def revoke_invite(self, request, pk=None):
-        """
-        Revoke a pending invite
-        """
-        invite_id = request.data.get("invite_id")
-        restaurant = self.get_object()
-
-        if request.user.role != "owner" or restaurant.owner != request.user:
-            return Response(
-                {"error": "Access denied"},
-                status=status.HTTP_403_FORBIDDEN
-            )
-
-        invite = StaffInvite.objects.filter(
-            id=invite_id,
-            restaurant=restaurant,
-            is_used=False
-        ).first()
-
-        if not invite:
-            return Response(
-                {"error": "Invite not found or already used"},
-                status=status.HTTP_404_NOT_FOUND
-            )
-
-        invite.delete()
-
-        return Response(
-            {"message": "Invite revoked successfully"},
-            status=status.HTTP_200_OK
-        )
-
 
     @action(detail=True, methods=['get'])
     def staff_list(self, request, pk=None):
@@ -478,36 +371,6 @@ class RestaurantViewSet(viewsets.ModelViewSet, BranchAccessMixin):
             'assigned_branches': list(valid_branches.values('id', 'name'))
         })
 
-
-class AcceptStaffInviteView(APIView):
-    permission_classes = [AllowAny]
-
-    def post(self, request):
-        """
-        Accept branch-specific staff invite
-        """
-        serializer = AcceptStaffInviteSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-
-        user = serializer.save()
-
-        return Response(
-            {
-                "message": "Invite accepted successfully",
-                "user": {
-                    "id": user.id,
-                    "email": user.email,
-                    "full_name": user.full_name,
-                    "role": user.role,
-                    "assigned_branches": list(
-                        user.assigned_branches.values(
-                            "id", "branch_name", "city"
-                        )
-                    )
-                }
-            },
-            status=status.HTTP_201_CREATED
-        )
 # ===============================
 # BRANCH MANAGEMENT
 # ===============================
@@ -677,6 +540,168 @@ class BranchViewSet(viewsets.ModelViewSet, BranchAccessMixin):
             'staff_count': staff.count(),
             'staff': UserSerializer(staff, many=True).data
         })
+
+
+#User Management
+
+class UserManagementViewSet(viewsets.ViewSet):
+    permission_classes = [IsAuthenticated]
+
+    @action(detail=False, methods=["post"])
+    def create_user(self, request):
+        """
+        Owner → create manager or staff
+        Manager → create staff (only for own branch)
+        """
+        creator = request.user
+
+        email = request.data.get("email")
+        password = request.data.get("password")
+        full_name = request.data.get("full_name")
+        role = request.data.get("role")
+        branch_ids = request.data.get("branch_ids", [])
+
+        if not all([email, password, full_name, role, branch_ids]):
+            return Response(
+                {"error": "email, password, full_name, role, branch_ids required"},
+                status=400
+            )
+
+        # 🔒 ROLE PERMISSIONS
+        if creator.role == "manager" and role != "staff":
+            return Response(
+                {"error": "Managers can only create staff"},
+                status=403
+            )
+
+        if creator.role not in ["owner", "manager"]:
+            return Response(
+                {"error": "Permission denied"},
+                status=403
+            )
+
+        # 🔒 BRANCH SCOPE
+        if creator.role == "manager":
+            allowed_branch_ids = list(
+                creator.assigned_branches.values_list("id", flat=True)
+            )
+            if set(branch_ids) != set(allowed_branch_ids):
+                return Response(
+                    {"error": "Manager can assign staff only to their own branch"},
+                    status=403
+                )
+
+        # OWNER validation
+        if creator.role == "owner":
+            valid_branches = Branch.objects.filter(
+                id__in=branch_ids,
+                restaurant__owner=creator,
+                is_active=True
+            )
+        else:
+            valid_branches = creator.assigned_branches.filter(
+                id__in=branch_ids,
+                is_active=True
+            )
+
+        if valid_branches.count() != len(branch_ids):
+            return Response(
+                {"error": "Invalid branch assignment"},
+                status=400
+            )
+
+        if User.objects.filter(email=email).exists():
+            return Response(
+                {"error": "User with this email already exists"},
+                status=400
+            )
+
+        # ✅ CREATE USER
+        user = User.objects.create_user(
+            email=email,
+            password=password,
+            full_name=full_name,
+            role=role
+        )
+
+        user.assigned_branches.set(valid_branches)
+
+        return Response(
+            {
+                "message": "User created successfully",
+                "user": {
+                    "id": user.id,
+                    "email": user.email,
+                    "full_name": user.full_name,
+                    "role": user.role,
+                    "assigned_branches": list(
+                        valid_branches.values("id", "branch_name", "city")
+                    )
+                }
+            },
+            status=201
+        )
+    
+    @action(detail=False, methods=["patch"])
+    def update_user(self, request):
+        editor = request.user
+        user_id = request.data.get("user_id")
+        branch_ids = request.data.get("branch_ids")
+
+        user = User.objects.filter(id=user_id).first()
+        if not user:
+            return Response({"error": "User not found"}, status=404)
+
+        # MANAGER RULES
+        if editor.role == "manager":
+            if user.role != "staff":
+                return Response({"error": "Managers can only edit staff"}, status=403)
+
+            if not editor.assigned_branches.filter(
+                id__in=user.assigned_branches.values_list("id", flat=True)
+            ).exists():
+                return Response({"error": "Access denied"}, status=403)
+
+        # OWNER RULES
+        if editor.role == "owner":
+            valid_branches = Branch.objects.filter(
+                id__in=branch_ids,
+                restaurant__owner=editor
+            )
+        else:
+            valid_branches = editor.assigned_branches
+
+        user.assigned_branches.set(valid_branches)
+
+        return Response({"message": "User updated successfully"})
+    
+    @action(detail=False, methods=["delete"])
+    def delete_user(self, request):
+        deleter = request.user
+        user_id = request.data.get("user_id")
+
+        user = User.objects.filter(id=user_id).first()
+        if not user:
+            return Response({"error": "User not found"}, status=404)
+
+        if deleter.role == "manager":
+            if user.role != "staff":
+                return Response({"error": "Managers can only delete staff"}, status=403)
+
+            if not deleter.assigned_branches.filter(
+                id__in=user.assigned_branches.values_list("id", flat=True)
+            ).exists():
+                return Response({"error": "Access denied"}, status=403)
+
+        if deleter.role != "owner" and deleter.role != "manager":
+            return Response({"error": "Permission denied"}, status=403)
+
+        user.delete()
+        return Response({"message": "User deleted successfully"})
+
+
+
+
 
 # ===============================
 # CATEGORY MANAGEMENT
@@ -1949,7 +1974,8 @@ class InventoryOrderViewSet(viewsets.ModelViewSet, BranchAccessMixin):
     def get_queryset(self):
         """Filter orders by accessible restaurants"""
         restaurants = self.get_accessible_restaurants()
-        return InventoryOrder.objects.filter(restaurant__in=restaurants)
+        return InventoryOrder.objects.filter(branch__in=self.get_accessible_branches())
+
 
     def create(self, request, *args, **kwargs):
         """Create inventory order"""

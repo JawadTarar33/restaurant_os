@@ -113,33 +113,6 @@ class Branch(models.Model):
         self.branch_name = value
 
 
-class StaffInvite(models.Model):
-    id = models.UUIDField(primary_key=True, default=uuid4, editable=False)
-
-    restaurant = models.ForeignKey(
-        Restaurant, on_delete=models.CASCADE, related_name="staff_invites"
-    )
-
-    branches = models.ManyToManyField(
-        Branch, related_name="staff_invites"
-    )
-
-    email = models.EmailField()
-    role = models.CharField(
-        max_length=20,
-        choices=[("staff", "Staff"), ("manager", "Manager")]
-    )
-
-    token = models.CharField(max_length=64, unique=True, db_index=True)
-    is_used = models.BooleanField(default=False)
-
-    created_at = models.DateTimeField(auto_now_add=True)
-    expires_at = models.DateTimeField()
-
-    def is_valid(self):
-        return not self.is_used and timezone.now() < self.expires_at
-
-
 class Category(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid4, editable=False)
     restaurant = models.ForeignKey(Restaurant, on_delete=models.CASCADE, related_name="categories")
@@ -221,8 +194,8 @@ class MenuItem(models.Model):
 # =========================
 class Customer(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid4, editable=False)
-    name = models.CharField(max_length=200)
-    contact = models.CharField(max_length=50, unique=True)
+    name = models.CharField(max_length=200, blank=True, null=True)
+    contact = models.CharField(max_length=50, unique=True, blank=True, null=True)
     email = models.EmailField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
 

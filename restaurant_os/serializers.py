@@ -137,16 +137,18 @@ class MenuItemSerializer(serializers.ModelSerializer):
 
     # KEEP EXISTING LOGIC
     recipe = RecipeSerializer(read_only=True)
+    branch = serializers.PrimaryKeyRelatedField(queryset=Branch.objects.all(),write_only=True, required=False)
+
 
     class Meta:
         model = MenuItem
         fields = [
-            'id', 'restaurant', 'restaurant_name', 'category', 'category_name',
-            'name', 'description', 'cost_price', 'sale_price', 'price_with_tax',
-            'profit_margin', 'status', 'image_url', 'image_file',
-            'preparation_time', 'updated_at',
-            'ingredients', 'recipe'
-        ]
+                    'id', 'restaurant', 'restaurant_name', 'branch',
+                    'category', 'category_name','name', 'description', 'cost_price', 'sale_price',
+                    'price_with_tax', 'profit_margin', 'status','image_url', 'image_file',
+                    'preparation_time', 'updated_at','ingredients', 'recipe'
+                ]
+
 
     def get_price_with_tax(self, obj):
         tax_rate = Decimal(obj.restaurant.tax_rate or 0) / 100
@@ -157,31 +159,85 @@ class MenuItemSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         ingredients = validated_data.pop("ingredients", [])
+        branch = validated_data.pop("branch", None)
+
+        if ingredients and not branch:
+            raise serializers.ValidationError(
+                {"branch": "branch is required when creating recipe ingredients"}
+            )
+
         item = super().create(validated_data)
 
-        # Only add new logic — DO NOT touch existing recipe logic
         if ingredients:
             recipe = Recipe.objects.create(
                 menu_item=item,
+                branch=branch,
                 name=f"Recipe for {item.name}",
                 preparation_time=item.preparation_time
             )
+
             for ing in ingredients:
                 RecipeIngredient.objects.create(recipe=recipe, **ing)
 
         return item
 
+
+
     def update(self, instance, validated_data):
         ingredients = validated_data.pop("ingredients", None)
+        branch = validated_data.pop("branch", None)
+
         item = super().update(instance, validated_data)
 
         if ingredients is not None:
-            recipe, _ = Recipe.objects.get_or_create(menu_item=item)
+            if not branch:
+                raise serializers.ValidationError(
+                    {"branch": "branch is required when updating recipe ingredients"}
+                )
+
+            recipe, _ = Recipe.objects.get_or_create(
+                menu_item=item,
+                branch=branch,
+                defaults={
+                    "name": f"Recipe for {item.name}",
+                    "preparation_time": item.preparation_time
+                }
+            )
+
             recipe.ingredients.all().delete()
             for ing in ingredients:
                 RecipeIngredient.objects.create(recipe=recipe, **ing)
 
         return item
+
+    def validate_restaurant(self, restaurant):
+        request = self.context["request"]
+        user = request.user
+
+        if user.role == "owner":
+            if restaurant.owner != user:
+                raise serializers.ValidationError("Invalid restaurant")
+        else:
+            raise serializers.ValidationError("Only owners can create menu items")
+
+        return restaurant
+
+    def validate_branch(self, branch):
+        request = self.context["request"]
+        user = request.user
+
+        if user.role == "owner":
+            if branch.restaurant.owner != user:
+                raise serializers.ValidationError("Invalid branch")
+        else:
+            if not user.assigned_branches.filter(id=branch.id).exists():
+                raise serializers.ValidationError("Access denied to branch")
+
+        return branch
+    
+
+
+
 
 # =========================
 # CUSTOMER & POS
@@ -301,118 +357,3 @@ class InventoryOrderSerializer(serializers.ModelSerializer):
         model = InventoryOrder
         fields = '__all__'
 
-
-class StaffInviteSerializer(serializers.ModelSerializer):
-    restaurant_name = serializers.CharField(
-        source="restaurant.name", read_only=True
-    )
-    branches = serializers.SerializerMethodField()
-
-    class Meta:
-        model = StaffInvite
-        fields = [
-            "id",
-            "email",
-            "role",
-            "restaurant",
-            "restaurant_name",
-            "branches",
-            "is_used",
-            "expires_at",
-            "created_at",
-        ]
-
-    def get_branches(self, obj):
-        return list(
-            obj.branches.values(
-                "id",
-                "branch_name",
-                "city"
-            )
-        )
-
-
-class CreateStaffInviteSerializer(serializers.Serializer):
-    email = serializers.EmailField()
-    role = serializers.ChoiceField(choices=["staff", "manager"])
-    branch_ids = serializers.ListField(
-        child=serializers.UUIDField(),
-        allow_empty=False
-    )
-
-    def validate_branch_ids(self, value):
-        request = self.context["request"]
-        restaurant = self.context["restaurant"]
-
-        branches = Branch.objects.filter(
-            id__in=value,
-            restaurant=restaurant,
-            is_active=True
-        )
-
-        if branches.count() != len(value):
-            raise serializers.ValidationError(
-                "One or more branches are invalid or do not belong to this restaurant."
-            )
-
-        return value
-
-    def validate(self, attrs):
-        email = attrs["email"]
-
-        if User.objects.filter(email=email).exists():
-            raise serializers.ValidationError(
-                {"email": "User with this email already exists."}
-            )
-
-        if StaffInvite.objects.filter(
-            email=email,
-            restaurant=self.context["restaurant"],
-            is_used=False,
-            expires_at__gt=timezone.now()
-        ).exists():
-
-            raise serializers.ValidationError(
-                {"email": "An active invite already exists for this email."}
-            )
-
-        return attrs
-
-
-class AcceptStaffInviteSerializer(serializers.Serializer):
-    token = serializers.CharField()
-    full_name = serializers.CharField(max_length=150)
-    password = serializers.CharField(write_only=True, min_length=6)
-
-    def validate_token(self, value):
-        invite = StaffInvite.objects.filter(token=value).first()
-
-        if not invite:
-            raise serializers.ValidationError("Invalid invite token.")
-
-        if invite.is_used:
-            raise serializers.ValidationError("Invite already used.")
-
-        if invite.expires_at < timezone.now():
-            raise serializers.ValidationError("Invite has expired.")
-
-        self.invite = invite
-        return value
-
-    def create(self, validated_data):
-        invite = self.invite
-
-        with transaction.atomic():
-            user = User.objects.create_user(
-                email=invite.email,
-                password=validated_data["password"],
-                full_name=validated_data["full_name"],
-                role=invite.role
-            )
-
-            user.assigned_branches.set(invite.branches.all())
-
-            invite.is_used = True
-            invite.save(update_fields=["is_used"])
-
-        return user

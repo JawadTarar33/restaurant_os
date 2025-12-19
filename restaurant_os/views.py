@@ -699,10 +699,6 @@ class UserManagementViewSet(viewsets.ViewSet):
         user.delete()
         return Response({"message": "User deleted successfully"})
 
-
-
-
-
 # ===============================
 # CATEGORY MANAGEMENT
 # ===============================
@@ -831,114 +827,234 @@ class MenuItemViewSet(viewsets.ModelViewSet, BranchAccessMixin):
     queryset = MenuItem.objects.all()
     serializer_class = MenuItemSerializer
     permission_classes = [IsAuthenticated]
-
     parser_classes = (MultiPartParser, FormParser)
 
+    # -------------------------
+    # QUERYSET (READ)
+    # -------------------------
     def get_queryset(self):
         restaurants = self.get_accessible_restaurants()
-        queryset = MenuItem.objects.filter(restaurant__in=restaurants)
+        qs = MenuItem.objects.filter(restaurant__in=restaurants)
 
         category_id = self.request.query_params.get("category_id")
         if category_id:
-            queryset = queryset.filter(category_id=category_id)
+            qs = qs.filter(category_id=category_id)
 
         restaurant_id = self.request.query_params.get("restaurant")
         if restaurant_id:
-            queryset = queryset.filter(restaurant_id=restaurant_id)
+            qs = qs.filter(restaurant_id=restaurant_id)
 
-        return queryset
+        return qs
 
+    # -------------------------
+    # CREATE (OWNER ONLY)
+    # -------------------------
     def create(self, request, *args, **kwargs):
         if request.user.role != "owner":
-            return Response({"error": "Only owners can create menu items"}, status=403)
-
+            return Response(
+                {"error": "Only owners can create menu items"},
+                status=status.HTTP_403_FORBIDDEN
+            )
         return super().create(request, *args, **kwargs)
 
+    # -------------------------
+    # UPDATE (ID IN BODY)
+    # -------------------------
     @action(detail=False, methods=["put", "patch"])
     def update_item(self, request):
         item_id = request.data.get("id")
         if not item_id:
-            return Response({"error": "id required"}, status=400)
+            return Response({"error": "id is required"}, status=400)
 
         try:
-            item = MenuItem.objects.get(id=item_id, restaurant__owner=request.user)
+            item = MenuItem.objects.get(
+                id=item_id,
+                restaurant__owner=request.user
+            )
         except MenuItem.DoesNotExist:
-            return Response({"error": "Not found or access denied"}, status=404)
+            return Response(
+                {"error": "Menu item not found or access denied"},
+                status=404
+            )
 
-        serializer = self.get_serializer(item, data=request.data, partial=True)
+        # 🔐 Branch permission check (only if recipe update)
+        if "ingredients" in request.data:
+            branch_id = request.data.get("branch")
+            if not branch_id:
+                return Response(
+                    {"error": "branch is required when updating recipe ingredients"},
+                    status=400
+                )
+
+            try:
+                branch = Branch.objects.get(id=branch_id)
+            except Branch.DoesNotExist:
+                return Response({"error": "Invalid branch"}, status=400)
+
+            user = request.user
+            if user.role == "owner":
+                if branch.restaurant.owner != user:
+                    return Response({"error": "Invalid branch"}, status=403)
+            else:
+                if not user.assigned_branches.filter(id=branch.id).exists():
+                    return Response({"error": "Access denied to branch"}, status=403)
+
+        serializer = self.get_serializer(
+            item,
+            data=request.data,
+            partial=True,
+            context={"request": request}
+        )
         serializer.is_valid(raise_exception=True)
         serializer.save()
 
-        return Response({
-            "status": "success",
-            "message": "Item updated successfully",
-            "data": serializer.data
-        })
+        return Response(
+            {
+                "status": "success",
+                "message": "Menu item updated successfully",
+                "data": serializer.data
+            },
+            status=200
+        )
 
-    @action(detail=False, methods=['post'])
+    # -------------------------
+    # GET SINGLE ITEM (ID IN BODY)
+    # -------------------------
+    @action(detail=False, methods=["post"])
     def get_item(self, request):
-        item_id = request.data.get('id')
+        item_id = request.data.get("id")
         if not item_id:
-            return Response({'error': 'id is required'}, status=400)
-        try:
-            item = MenuItem.objects.get(id=item_id)
-        except MenuItem.DoesNotExist:
-            return Response({'error': 'Menu item not found'}, status=404)
+            return Response({"error": "id is required"}, status=400)
 
-        serializer = self.get_serializer(item, context={'request': request})
+        restaurants = self.get_accessible_restaurants()
+
+        try:
+            item = MenuItem.objects.get(
+                id=item_id,
+                restaurant__in=restaurants
+            )
+        except MenuItem.DoesNotExist:
+            return Response(
+                {"error": "Menu item not found or access denied"},
+                status=404
+            )
+
+        serializer = self.get_serializer(item, context={"request": request})
         return Response(serializer.data, status=200)
 
-
-    @action(detail=False, methods=['delete', 'post'])
+    # -------------------------
+    # DELETE SINGLE (OWNER ONLY)
+    # -------------------------
+    @action(detail=False, methods=["delete"])
     def delete_item(self, request):
-        item_id = request.data.get('id')
-        if not item_id:
-            return Response({'error': 'id is required'}, status=400)
-        try:
-            item = MenuItem.objects.get(id=item_id, restaurant__owner=request.user)
-        except MenuItem.DoesNotExist:
-            return Response({'error': 'Menu item not found or access denied'}, status=404)
-        item.delete()
-        return Response({'status': 'success', 'message': 'Menu item deleted successfully'}, status=200)
+        if request.user.role != "owner":
+            return Response(
+                {"error": "Only owners can delete menu items"},
+                status=403
+            )
 
-    @action(detail=False, methods=['post', 'delete'])
+        item_id = request.data.get("id")
+        if not item_id:
+            return Response({"error": "id is required"}, status=400)
+
+        try:
+            item = MenuItem.objects.get(
+                id=item_id,
+                restaurant__owner=request.user
+            )
+        except MenuItem.DoesNotExist:
+            return Response(
+                {"error": "Menu item not found or access denied"},
+                status=404
+            )
+
+        item.delete()
+        return Response(
+            {"status": "success", "message": "Menu item deleted successfully"},
+            status=200
+        )
+
+    # -------------------------
+    # DELETE MULTIPLE (OWNER ONLY)
+    # -------------------------
+    @action(detail=False, methods=["post"])
     def delete_multiple(self, request):
-        item_ids = request.data.get('ids')
+        if request.user.role != "owner":
+            return Response(
+                {"error": "Only owners can delete menu items"},
+                status=403
+            )
+
+        item_ids = request.data.get("ids")
         if not isinstance(item_ids, list) or not item_ids:
-            return Response({'error': 'ids must be a non-empty list'}, status=400)
+            return Response(
+                {"error": "ids must be a non-empty list"},
+                status=400
+            )
 
         with transaction.atomic():
-            items = MenuItem.objects.filter(id__in=item_ids, restaurant__owner=request.user)
+            items = MenuItem.objects.filter(
+                id__in=item_ids,
+                restaurant__owner=request.user
+            )
+
             if not items.exists():
-                return Response({'error': 'No matching menu items found or access denied'}, status=404)
+                return Response(
+                    {"error": "No matching menu items found"},
+                    status=404
+                )
+
             deleted_count = items.count()
             items.delete()
 
-        return Response({'status': 'success', 'message': f'{deleted_count} menu items deleted successfully'}, status=200)
+        return Response(
+            {
+                "status": "success",
+                "message": f"{deleted_count} menu items deleted successfully"
+            },
+            status=200
+        )
 
-    @action(detail=False, methods=['patch'])
+    # -------------------------
+    # TOGGLE AVAILABILITY (OWNER ONLY)
+    # -------------------------
+    @action(detail=False, methods=["patch"])
     def toggle_availability(self, request):
-        if request.user.role != 'owner':
-            return Response({'error': 'Only owners can toggle menu items'}, status=403)
+        if request.user.role != "owner":
+            return Response(
+                {"error": "Only owners can toggle menu items"},
+                status=403
+            )
 
-        item_id = request.data.get('id')
+        item_id = request.data.get("id")
         if not item_id:
-            return Response({'error': 'id is required'}, status=400)
+            return Response({"error": "id is required"}, status=400)
 
         try:
-            item = MenuItem.objects.get(id=item_id, restaurant__owner=request.user)
+            item = MenuItem.objects.get(
+                id=item_id,
+                restaurant__owner=request.user
+            )
         except MenuItem.DoesNotExist:
-            return Response({'error': 'Menu item not found or access denied'}, status=404)
+            return Response(
+                {"error": "Menu item not found or access denied"},
+                status=404
+            )
 
         item.available = not item.available
-        # Map property to status field, we already implemented property setter
-        item.save(update_fields=['status'])
+        item.save(update_fields=["status"])
 
-        return Response({
-            'status': 'success',
-            'message': f'Item {"enabled" if item.available else "disabled"} successfully',
-            'data': {'id': str(item.id), 'available': item.available}
-        }, status=200)
+        return Response(
+            {
+                "status": "success",
+                "message": f"Item {'enabled' if item.available else 'disabled'} successfully",
+                "data": {
+                    "id": str(item.id),
+                    "available": item.available
+                }
+            },
+            status=200
+        )
 
 # ===============================
 # CUSTOMER MANAGEMENT
@@ -1870,7 +1986,6 @@ class RecipeViewSet(viewsets.ModelViewSet, BranchAccessMixin):
             'unavailable_items': unavailable,
             'count': len(unavailable)
         })
-
 
 
 class IngredientViewSet(viewsets.ModelViewSet, BranchAccessMixin):

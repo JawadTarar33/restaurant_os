@@ -40,7 +40,7 @@ router.register(r'inventory-orders', InventoryOrderViewSet, basename='inventory-
 router.register(r'recipes', RecipeViewSet, basename='recipes')
 router.register(r'inventory-transactions', InventoryTransactionViewSet, basename='inventory-transactions')
 router.register(r'ingredients', IngredientViewSet, basename='ingredients')
-
+router.register(r'users', UserManagementViewSet, basename='users')
 # =============================
 # ADDITIONAL NON-ROUTER ENDPOINTS
 # =============================
@@ -59,7 +59,6 @@ additional_patterns = [
     path('auth/register/', AuthViewSet.as_view({'post': 'register'}), name='jwt_register'),
     path('auth/logout/', AuthViewSet.as_view({'post': 'logout'}), name='jwt_logout'),
     path('auth/me/', AuthViewSet.as_view({'get': 'me'}), name='jwt_me'),
-    path("auth/accept-invite/", AcceptStaffInviteView.as_view(),name="accept-staff-invite"),
 
 ]
 

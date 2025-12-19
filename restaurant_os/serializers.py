@@ -182,34 +182,6 @@ class MenuItemSerializer(serializers.ModelSerializer):
         return item
 
 
-
-    def update(self, instance, validated_data):
-        ingredients = validated_data.pop("ingredients", None)
-        branch = validated_data.pop("branch", None)
-
-        item = super().update(instance, validated_data)
-
-        if ingredients is not None:
-            if not branch:
-                raise serializers.ValidationError(
-                    {"branch": "branch is required when updating recipe ingredients"}
-                )
-
-            recipe, _ = Recipe.objects.get_or_create(
-                menu_item=item,
-                branch=branch,
-                defaults={
-                    "name": f"Recipe for {item.name}",
-                    "preparation_time": item.preparation_time
-                }
-            )
-
-            recipe.ingredients.all().delete()
-            for ing in ingredients:
-                RecipeIngredient.objects.create(recipe=recipe, **ing)
-
-        return item
-
     def validate_restaurant(self, restaurant):
         request = self.context["request"]
         user = request.user
